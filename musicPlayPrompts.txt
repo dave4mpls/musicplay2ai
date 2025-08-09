@@ -1,0 +1,47 @@
+What I tell the AI to make my program:
+
+KEYBOARD COMPONENT:
+
+Hi Gemini!  I'm making another HTML/Javascript reusable component for my musical program.  This one should have no external dependencies and should render its UI inside of a single Canvas control.  The purpose of the control is to implement a piano keyboard that sends MIDI messages on MIDI channel 1 (considered 00 in MIDI's zero-based message format) to a callback function for note on and note off, whenever keys are depressed or released.  It should work with touch and mouse so that it can be used on both mobile and desktop applications.
+
+
+
+The piano keyboard should have 88 keys like a real piano, and they should look like piano keys, including some shading or rounding so they look more realistic.  They should be drawn on the canvas as the control is used.  The control should be able to work within an existing canvas without resizing it, and should accept any size of canvas, and draw proportional keys that have the same proportion as regular piano keys.  
+
+
+
+The keys should be reasonably large so they can be easily pressed, which means that on most sizes of canvas (especially on mobile), the keys won't all fit on the screen at the same time.  The area underneath the piano keys should be light gray and when the user drags the mouse or a single finger along that area, it will scroll the keyboard back and forth so that you can see the rest of the keys.
+
+
+
+Other motions that the user can do, with touch or mouse, include:
+
+* They can press any number of fingers down on any number of keys, simultaneously or at different times, and release those keys, and it will send the appropriate MIDI messages for each finger so that the user can play chords.
+
+* If the user presses down on one key and then drags the finger across other keys, those keys will also play, so that the user can glide up and down the keyboard as you would with a real keyboard.
+
+* The note off signal is sent when the user releases their finger or mouse from the given key.
+
+* Input from the computer keyboard should also be accepted.  The keys in the row qwertyuiop shall be white keys starting with middle C.  The keys in the number row above there should be the corresponding black keys.  The keys in the asdf row and the zxcv row do not have assigned uses, but the caller of the component can provide a configuration array that is used for unassigned keys so that those keys can be mapped to functions.  Meanwhile, the comma key should move the computer keyboard midi messages down an octave, and the period key should move the computer keyboard midi messages up an octave.
+
+* The component should be self contained and with no dependencies and reusable in other scripts; it should be plain Javascript.  It should be embedded in a single HTML file along with a demo program that displays an example keyboard.  The "midi message callback function" in the demo should send the messages to a Web MIDI output device, selected by the user using a selector drop-down based on the devices that currently exist on the user's computer.
+
+=====
+
+That's great.  Here are some adjustments:
+
+* Instead of the scrolling method I told you before, just have a grey scrollbar (not a real DOM one-- just render a grey bar to scroll with at the bottom of the canvas) that drags to the left or right when you drag it to the left or right, and scrolls the keyboard like a regular scroll bar.  If you need more space to show this scroll bar, you should remove some space from the keys and make them shorter.  The scroll bar should be at least the height of a typical OS scroll bar (say, 15 px).  It should have rounded ends. 
+
+* Make sure that the keys stay proportional to the real proportions of a piano keyboard regardless of the aspect ratio of the containing canvas.
+
+* Make it so that the demo of the component lets you resize the container it is in (using a thick draggable border) so that I can see how the component responds to different sizes.
+
+=======
+
+Further changes:
+
+* When the canvas gets bigger, there should be a maximum width of the keys, so that more keys can fit on a bigger window.  Since we are maintaining the proportions of the keys, that will mean that there is extra space below the keys, which is fine-- that space can be light gray and the scroll bar can be dark gray.
+
+* The keys should always be resized such athat a vertical scrollbar is never needed.
+
+* Make sure that the thing that lets you resize the component is not a part of the component itself-- it is just part of the demo of the component.

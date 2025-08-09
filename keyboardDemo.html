@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTML Canvas Piano Keyboard</title>
+    <style>
+        /* General styling for the page */
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden; /* Prevent scrollbars on the body itself */
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            color: #333;
+            display: flex; /* Use flexbox for the main layout */
+        }
+
+        /* Main container for the application demo */
+        .container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            background: #ffffff;
+            /* No fixed size or resize handle; it fills the body */
+        }
+
+        /* Header section with title and controls */
+        .header {
+            flex-shrink: 0; /* Prevent the header from shrinking */
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+            background-color: #fff;
+            z-index: 10;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            color: #111827;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        /* Styling for the MIDI output selector */
+        #midi-outputs {
+            padding: 0.5rem 0.75rem;
+            border-radius: 6px;
+            border: 1px solid #d1d5db;
+            background-color: #fff;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        #midi-outputs:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
+        }
+        
+        /* Wrapper for the canvas to make it fill remaining space */
+        .canvas-wrapper {
+            flex-grow: 1; /* This makes the wrapper fill all available vertical space */
+            position: relative; /* Needed for the absolutely positioned canvas */
+            min-height: 0; /* A flexbox hack to prevent overflow issues */
+        }
+
+        /* Canvas where the piano is rendered */
+        #piano-keyboard-canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: block;
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h1>Piano Keyboard</h1>
+            <div class="controls">
+                <label for="midi-outputs">MIDI Output:</label>
+                <select id="midi-outputs">
+                    <option value="">No devices found</option>
+                </select>
+            </div>
+        </div>
+        <div class="canvas-wrapper">
+            <canvas id="piano-keyboard-canvas"></canvas>
+        </div>
+    </div>
+
+    <script>
+    /**
+     * SliderControl Component
+     * A reusable slider control to be rendered on a canvas.
+     */
+    class SliderControl {
+        constructor(config) {
+            this.ctx = config.ctx;
+            this.label = config.label;
+            this.x = config.x;
+            this.y = config.y;
+            this.width = config.width || 100;
+            this.height = 24; // Full interactive height
+            this.min = config.min || 0;
+            this.max = config.max || 127;
+            this.value = config.initialValue;
+            this.font = config.font || '12px sans-serif';
+        }
+
+        getBounds() {
+            const trackHeight = 6;
+            const handleWidth = 12;
+            const trackX = this.x;
+            const trackY = this.y + this.height / 2 - trackHeight / 2;
+            const handleX = trackX + ((this.value - this.min) / (this.max - this.min)) * this.width - (handleWidth / 2);
+            const handleY = this.y;
+            
+            return {
+                track: { x: trackX, y: trackY, width: this.width, height: trackHeight },
+                handle: { x: handleX, y: handleY, width: handleWidth, height: this.height }
+            };
+        }
+
+        draw() {
+            const bounds = this.getBounds();
+            this.ctx.save();
+            this.ctx.font = this.font;
+            this.ctx.fillStyle = '#333';
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText(this.label, bounds.track.x, bounds.track.y - 10);
+
+            // Draw track
+            this.ctx.fillStyle = '#a0a0a0';
+            this.ctx.beginPath();
+            this.ctx.roundRect(bounds.track.x, bounds.track.y, bounds.track.width, bounds.track.height, 3);
+            this.ctx.fill();
+
+            // Draw handle
+            this.ctx.fillStyle = '#3b82f6';
+            this.ctx.strokeStyle = '#2563eb';
+            this.ctx.lineWidth = 1;
+            this.ctx.beginPath();
+            this.ctx.roundRect(bounds.handle.x, bounds.handle.y, bounds.handle.width, bounds.handle.height, 4);
+            this.ctx.fill();
+            this.ctx.stroke();
+            
+            // Draw value
+            this.ctx.textAlign = 'right';
+            this.ctx.fillText(this.value, bounds.track.x + bounds.track.width, bounds.track.y - 10);
+            this.ctx.restore();
+        }
+
+        updateValueFromPosition(x) {
+            const bounds = this.getBounds();
+            const relativeX = x - bounds.track.x;
+            const ratio = Math.max(0, Math.min(1, relativeX / bounds.track.width));
+            this.value = Math.round(this.min + ratio * (this.max - this.min));
+        }
+
+        isPointOnControl(x, y) {
+            const bounds = this.getBounds();
+            const interactiveArea = {
+                x: bounds.track.x,
+                y: bounds.handle.y,
+                width: bounds.track.width,
+                height: bounds.handle.height
+            };
+            return x >= interactiveArea.x && x <= interactiveArea.x + interactiveArea.width &&
+                   y >= interactiveArea.y && y <= interactiveArea.y + interactiveArea.height;
+        }
+    }
+
+    /**
+     * PianoKeyboard Component
+     */
+    class PianoKeyboard {
+        constructor(config) {
+            this.canvas = config.canvas;
+            this.ctx = this.canvas.getContext('2d');
+            this.midiCallback = config.midiCallback;
+            this.customKeyMappings = config.customKeyMappings || [];
+            this.onSettingsChange = config.onSettingsChange || (() => {});
+            this.canvasId = this.canvas.id || 'piano-keyboard-default';
+
+            // --- State Variables ---
+            this.keys = [];
+            this.activeTouches = new Map();
+            this.computerKeysDown = new Set();
+            this.scrollOffset = 0;
+            this.octaveOffset = 0;
+            this.calculatedKeyHeight = 0; 
+            
+            // Drawer State
+            this.isDrawerOpen = false;
+            this.drawerScrollOffsetY = 0;
+            this.calculatedDrawerContentHeight = 0;
+            
+            // --- Settings & Controls ---
+            this.settings = { volume: 100, minVelocity: 0, maxVelocity: 127 };
+            this.volumeSlider = new SliderControl({ ctx: this.ctx, label: 'Volume', initialValue: this.settings.volume, width: 100 });
+            this.minVelocitySlider = new SliderControl({ ctx: this.ctx, label: 'Min', initialValue: this.settings.minVelocity, width: 100 });
+            this.maxVelocitySlider = new SliderControl({ ctx: this.ctx, label: 'Max', initialValue: this.settings.maxVelocity, width: 100 });
+            this.controls = [this.volumeSlider, this.minVelocitySlider, this.maxVelocitySlider];
+
+            // --- Constants ---
+            this.TOTAL_KEYS = 88;
+            this.WHITE_KEYS_COUNT = 52;
+            this.LOWEST_NOTE = 21;
+            this.SCROLLBAR_HEIGHT = 20;
+            this.WHITE_KEY_ASPECT_RATIO = 5.5; 
+            this.BLACK_KEY_WIDTH_RATIO = 0.6;
+            this.BLACK_KEY_HEIGHT_RATIO = 0.6;
+            this.MAX_WHITE_KEY_WIDTH = 40;
+            this.DRAWER_OPEN_HEIGHT_RATIO = 0.35;
+            this.DRAWER_HANDLE_HEIGHT = 20;
+
+            this.initKeys();
+            this.initEventListeners();
+            this.loadSettings(); // Load settings after init
+            this.resizeCanvas();
+        }
+
+        initKeys() {
+            let whiteKeyIndex = 0;
+            for (let i = 0; i < this.TOTAL_KEYS; i++) {
+                const note = this.LOWEST_NOTE + i;
+                const isBlack = [1, 3, 6, 8, 10].includes(note % 12);
+                this.keys.push({ note, isBlack, isPressed: false, x: 0, y: 0, width: 0, height: 0, whiteKeyIndex: isBlack ? -1 : whiteKeyIndex++ });
+            }
+        }
+
+        initEventListeners() {
+            new ResizeObserver(() => this.resizeCanvas()).observe(this.canvas);
+            this.canvas.addEventListener('mousedown', this.handlePointerDown.bind(this));
+            window.addEventListener('mousemove', this.handlePointerMove.bind(this));
+            window.addEventListener('mouseup', this.handlePointerUp.bind(this));
+            this.canvas.addEventListener('touchstart', this.handlePointerDown.bind(this), { passive: false });
+            window.addEventListener('touchmove', this.handlePointerMove.bind(this), { passive: false });
+            window.addEventListener('touchend', this.handlePointerUp.bind(this));
+            window.addEventListener('touchcancel', this.handlePointerUp.bind(this));
+            window.addEventListener('keydown', this.handleKeyDown.bind(this));
+            window.addEventListener('keyup', this.handleKeyUp.bind(this));
+        }
+
+        resizeCanvas() {
+            if (this.canvas.width !== this.canvas.clientWidth || this.canvas.height !== this.canvas.clientHeight) {
+                this.canvas.width = this.canvas.clientWidth;
+                this.canvas.height = this.canvas.clientHeight;
+                this.draw();
+            }
+        }
+
+        handlePointerDown(e) {
+            e.preventDefault();
+            const pointers = e.changedTouches ? e.changedTouches : [e];
+            const rect = this.canvas.getBoundingClientRect();
+
+            for (const pointer of pointers) {
+                const x = pointer.clientX - rect.left;
+                const y = pointer.clientY - rect.top;
+                const id = pointer.identifier ?? 'mouse';
+                
+                if (this.isPointInRect(x, y, this.getDrawerHandleBounds())) {
+                    this.isDrawerOpen = !this.isDrawerOpen;
+                    this.draw();
+                    return;
+                }
+
+                if (this.isDrawerOpen) {
+                    const drawerContentY = this.DRAWER_HANDLE_HEIGHT;
+                    if (y > drawerContentY && y < drawerContentY + this.calculatedDrawerContentHeight) {
+                        const controlX = x;
+                        const controlY = y - drawerContentY + this.drawerScrollOffsetY;
+                        
+                        let controlInteracted = false;
+                        for (const control of this.controls) {
+                            if (control.isPointOnControl(controlX, controlY)) {
+                                this.activeTouches.set(id, { type: 'control', control: control });
+                                control.updateValueFromPosition(controlX);
+                                this.updateSettingsFromControls();
+                                controlInteracted = true;
+                                break;
+                            }
+                        }
+                        if (controlInteracted) { this.draw(); continue; }
+
+                        this.activeTouches.set(id, { type: 'drawerPan', lastY: y });
+                        this.draw();
+                        continue;
+                    }
+                }
+
+                if (this.isPointInRect(x, y, this.getScrollbarHandleBounds())) {
+                    this.activeTouches.set(id, { type: 'scrollbar', startX: x - this.getScrollbarHandleBounds().x });
+                    this.draw();
+                    continue; 
+                }
+
+                const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
+                const panAreaTop = totalDrawerHeight + this.calculatedKeyHeight;
+                const panAreaBottom = this.canvas.height - this.SCROLLBAR_HEIGHT;
+                if (y > panAreaTop && y < panAreaBottom) {
+                    this.activeTouches.set(id, { type: 'pan', lastX: x });
+                    this.draw();
+                    continue;
+                }
+
+                const key = this.getKeyAt(x, y);
+                if (key) {
+                    this.pressKey(key.note);
+                    this.activeTouches.set(id, { type: 'key', note: key.note });
+                }
+            }
+            this.draw();
+        }
+
+        handlePointerMove(e) {
+            if (this.activeTouches.size === 0) return;
+            e.preventDefault();
+            const pointers = e.changedTouches ? e.changedTouches : [e];
+            const rect = this.canvas.getBoundingClientRect();
+
+            for (const pointer of pointers) {
+                const x = pointer.clientX - rect.left;
+                const y = pointer.clientY - rect.top;
+                const id = pointer.identifier ?? 'mouse';
+                const activeTouch = this.activeTouches.get(id);
+
+                if (!activeTouch) continue;
+
+                switch(activeTouch.type) {
+                    case 'control':
+                        activeTouch.control.updateValueFromPosition(x);
+                        this.updateSettingsFromControls();
+                        break;
+                    case 'drawerPan':
+                        const dy = y - activeTouch.lastY;
+                        this.drawerScrollOffsetY -= dy;
+                        this.clampDrawerScroll();
+                        activeTouch.lastY = y;
+                        break;
+                    case 'scrollbar':
+                        const { totalWidth, handleWidth, trackWidth } = this.getScrollbarMetrics();
+                        if (totalWidth <= this.canvas.width) return;
+                        const newHandleX = x - activeTouch.startX;
+                        const travelDist = trackWidth - handleWidth;
+                        const scrollRatio = Math.max(0, Math.min(1, newHandleX / travelDist));
+                        this.scrollOffset = scrollRatio * (totalWidth - this.canvas.width);
+                        this.clampScrollOffset();
+                        break;
+                    case 'pan':
+                        const dx = x - activeTouch.lastX;
+                        this.scrollOffset -= dx;
+                        this.clampScrollOffset();
+                        activeTouch.lastX = x;
+                        break;
+                    case 'key':
+                        const currentKey = this.getKeyAt(x, y);
+                        const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
+                        if (currentKey && currentKey.note !== activeTouch.note) {
+                            this.releaseKey(activeTouch.note);
+                            this.pressKey(currentKey.note);
+                            this.activeTouches.set(id, { type: 'key', note: currentKey.note });
+                        } else if (!currentKey && y > totalDrawerHeight) {
+                            this.releaseKey(activeTouch.note);
+                            this.activeTouches.delete(id);
+                        }
+                        break;
+                }
+            }
+            this.draw();
+        }
+
+        handlePointerUp(e) {
+            e.preventDefault();
+            const pointers = e.changedTouches ? e.changedTouches : [e];
+            for (const pointer of pointers) {
+                const id = pointer.identifier ?? 'mouse';
+                const activeTouch = this.activeTouches.get(id);
+                if (activeTouch) {
+                    if (activeTouch.type === 'key') this.releaseKey(activeTouch.note);
+                    if (activeTouch.type === 'control') this.saveSettings();
+                    this.activeTouches.delete(id);
+                }
+            }
+            this.draw();
+        }
+        
+        handleKeyDown(e) {
+            if (e.repeat || this.computerKeysDown.has(e.code)) return;
+            const keyMapping = this.getComputerKeyMapping();
+            const noteInfo = keyMapping[e.code];
+            if (noteInfo) {
+                this.computerKeysDown.add(e.code);
+                this.pressKey(noteInfo.note + (this.octaveOffset * 12));
+            } else if (e.code === 'Comma') {
+                this.octaveOffset = Math.max(-4, this.octaveOffset - 1);
+            } else if (e.code === 'Period') {
+                this.octaveOffset = Math.min(4, this.octaveOffset + 1);
+            }
+            this.draw();
+        }
+
+        handleKeyUp(e) {
+            const keyMapping = this.getComputerKeyMapping();
+            const noteInfo = keyMapping[e.code];
+            if (noteInfo) {
+                this.computerKeysDown.delete(e.code);
+                this.releaseKey(noteInfo.note + (this.octaveOffset * 12));
+            }
+            this.draw();
+        }
+        
+        getComputerKeyMapping() {
+            const baseNote = 60;
+            const mapping = {'KeyQ':{note:baseNote+0},'KeyW':{note:baseNote+2},'KeyE':{note:baseNote+4},'KeyR':{note:baseNote+5},'KeyT':{note:baseNote+7},'KeyY':{note:baseNote+9},'KeyU':{note:baseNote+11},'KeyI':{note:baseNote+12},'KeyO':{note:baseNote+14},'KeyP':{note:baseNote+16},'Digit2':{note:baseNote+1},'Digit3':{note:baseNote+3},'Digit5':{note:baseNote+6},'Digit6':{note:baseNote+8},'Digit7':{note:baseNote+10},'Digit9':{note:baseNote+13},'Digit0':{note:baseNote+15}};
+            this.customKeyMappings.forEach(m => { mapping[m.code] = { note: m.note }; });
+            return mapping;
+        }
+
+        pressKey(note) {
+            const key = this.keys.find(k => k.note === note);
+            if (key) {
+                key.isPressed = true;
+                const velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, this.settings.volume));
+                this.midiCallback([0x90, note, velocity], "internal");
+            }
+        }
+
+        releaseKey(note) {
+            const key = this.keys.find(k => k.note === note);
+            if (key) {
+                key.isPressed = false;
+                this.midiCallback([0x80, note, 0], "internal");
+            }
+        }
+
+        handleExternalMidiMessage(message, deviceName) {
+            const status = message[0], command = status & 0xF0, originalChannel = status & 0x0F;
+            const newMessage = [...message];
+
+            if (command === 0x90 || command === 0x80) {
+                const note = message[1];
+                let velocity = (message.length > 2) ? message[2] : 0;
+                const key = this.keys.find(k => k.note === note);
+                
+                if (command === 0x90 && velocity > 0) {
+                    if (key) key.isPressed = true;
+                    velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, velocity));
+                    newMessage[2] = velocity;
+                } else {
+                    if (key) key.isPressed = false;
+                }
+                this.draw();
+            }
+            
+            const newChannel = (originalChannel === 9) ? 9 : 0;
+            newMessage[0] = command | newChannel;
+            this.midiCallback(newMessage, deviceName);
+        }
+
+        getKeyAt(x, y) {
+            const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
+            if (y < totalDrawerHeight || y > totalDrawerHeight + this.calculatedKeyHeight) return null;
+            const adjustedY = y - totalDrawerHeight;
+            for (const key of this.keys.filter(k => k.isBlack).reverse()) {
+                if (x >= key.x && x <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
+            }
+            for (const key of this.keys.filter(k => !k.isBlack).reverse()) {
+                if (x >= key.x && x <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
+            }
+            return null;
+        }
+
+        draw() {
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+            this.calculateDimensions();
+            this.clampScrollOffset();
+            this.drawDrawer();
+            const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
+            const keyBottomY = totalDrawerHeight + this.calculatedKeyHeight;
+            const scrollbarTopY = this.canvas.height - this.SCROLLBAR_HEIGHT;
+            if (keyBottomY < scrollbarTopY) {
+                this.ctx.fillStyle = '#f0f0f0';
+                this.ctx.fillRect(0, keyBottomY, this.canvas.width, scrollbarTopY - keyBottomY);
+            }
+            if (this.calculatedKeyHeight > 0) {
+                this.ctx.save();
+                this.ctx.translate(0, totalDrawerHeight);
+                this.keys.filter(k => !k.isBlack).forEach(key => this.drawWhiteKey(key));
+                this.keys.filter(k => k.isBlack).forEach(key => this.drawBlackKey(key));
+                this.ctx.restore();
+            }
+            this.drawScrollbar();
+        }
+
+        calculateDimensions() {
+            this.calculatedDrawerContentHeight = this.isDrawerOpen ? (this.canvas.height * this.DRAWER_OPEN_HEIGHT_RATIO) - this.DRAWER_HANDLE_HEIGHT : 0;
+            if (this.calculatedDrawerContentHeight < 0) this.calculatedDrawerContentHeight = 0;
+            const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
+            const availableHeight = this.canvas.height - this.SCROLLBAR_HEIGHT - totalDrawerHeight;
+            if (availableHeight <= 0) {
+                this.calculatedKeyHeight = 0;
+                this.keys.forEach(k => { k.width = k.height = 0; });
+                return;
+            }
+            const widthFromHeight = availableHeight / this.WHITE_KEY_ASPECT_RATIO;
+            const whiteKeyWidth = Math.min(widthFromHeight, this.MAX_WHITE_KEY_WIDTH);
+            this.calculatedKeyHeight = whiteKeyWidth * this.WHITE_KEY_ASPECT_RATIO;
+            const blackKeyWidth = whiteKeyWidth * this.BLACK_KEY_WIDTH_RATIO;
+            const blackKeyHeight = this.calculatedKeyHeight * this.BLACK_KEY_HEIGHT_RATIO;
+            this.keys.forEach(key => {
+                if (!key.isBlack) {
+                    key.width = whiteKeyWidth;
+                    key.height = this.calculatedKeyHeight;
+                    key.x = key.whiteKeyIndex * whiteKeyWidth - this.scrollOffset;
+                    key.y = 0;
+                }
+            });
+            this.keys.forEach(key => {
+                if (key.isBlack) {
+                    const prevKey = this.keys[key.note - this.LOWEST_NOTE - 1];
+                    key.width = blackKeyWidth;
+                    key.height = blackKeyHeight;
+                    key.x = prevKey.x + prevKey.width - (blackKeyWidth / 2);
+                    key.y = 0;
+                }
+            });
+        }
+
+        clampScrollOffset() {
+            const { totalWidth } = this.getScrollbarMetrics();
+            const maxScroll = totalWidth - this.canvas.width;
+            this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll > 0 ? maxScroll : 0));
+        }
+
+        drawWhiteKey(key) {
+            if (key.x > this.canvas.width || key.x + key.width < 0) return;
+            this.ctx.save();
+            const cornerRadius = Math.min(6, key.width / 4, key.height / 8);
+            this.ctx.beginPath();
+            this.ctx.roundRect(key.x, key.y, key.width, key.height, [0, 0, cornerRadius, cornerRadius]);
+            const grad = this.ctx.createLinearGradient(key.x, key.y, key.x + key.width, key.y);
+            if (key.isPressed) { grad.addColorStop(0, '#a0c4ff'); grad.addColorStop(1, '#c0d8ff'); } 
+            else { grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.8, '#f8f8f8'); grad.addColorStop(1, '#e8e8e8'); }
+            this.ctx.fillStyle = grad;
+            this.ctx.fill();
+            this.ctx.strokeStyle = '#999';
+            this.ctx.lineWidth = 1;
+            this.ctx.stroke();
+            this.ctx.restore();
+        }
+
+        drawBlackKey(key) {
+            if (key.x > this.canvas.width || key.x + key.width < 0) return;
+            this.ctx.save();
+            const cornerRadius = Math.min(5, key.width / 4, key.height / 8);
+            this.ctx.beginPath();
+            this.ctx.roundRect(key.x, key.y, key.width, key.height, [0, 0, cornerRadius, cornerRadius]);
+            const grad = this.ctx.createLinearGradient(key.x, key.y, key.x + key.width, key.y);
+            if (key.isPressed) { grad.addColorStop(0, '#7b1fa2'); grad.addColorStop(1, '#5a0f82'); } 
+            else { grad.addColorStop(0, '#4a4a4a'); grad.addColorStop(1, '#2a2a2a'); }
+            this.ctx.fillStyle = grad;
+            this.ctx.fill();
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+            this.ctx.fillRect(key.x + 2, key.y + 2, key.width - 4, 2);
+            this.ctx.restore();
+        }
+
+        drawDrawer() {
+            this.drawDrawerHandle();
+            if (!this.isDrawerOpen) return;
+            this.ctx.save();
+            const drawerContentY = this.DRAWER_HANDLE_HEIGHT;
+            this.ctx.fillStyle = '#e0e0e0';
+            this.ctx.fillRect(0, drawerContentY, this.canvas.width, this.calculatedDrawerContentHeight);
+            this.ctx.strokeStyle = '#b0b0b0';
+            this.ctx.beginPath();
+            this.ctx.moveTo(0, drawerContentY + this.calculatedDrawerContentHeight);
+            this.ctx.lineTo(this.canvas.width, drawerContentY + this.calculatedDrawerContentHeight);
+            this.ctx.stroke();
+            
+            // Clip the drawing area for the drawer content
+            this.ctx.beginPath();
+            this.ctx.rect(0, drawerContentY, this.canvas.width, this.calculatedDrawerContentHeight);
+            this.ctx.clip();
+
+            this.ctx.translate(0, drawerContentY - this.drawerScrollOffsetY);
+            
+            let yPos = 20;
+            for (const control of this.controls) {
+                control.x = 20;
+                control.y = yPos;
+                control.draw();
+                yPos += 40;
+            }
+            
+            this.ctx.restore();
+            this.drawDrawerScrollbar();
+        }
+        
+        drawDrawerHandle() {
+            const bounds = this.getDrawerHandleBounds();
+            this.ctx.save();
+            this.ctx.fillStyle = '#b0b0b0';
+            this.ctx.beginPath();
+            this.ctx.roundRect(bounds.x, bounds.y, bounds.width, bounds.height, [0, 0, 10, 10]);
+            this.ctx.fill();
+            this.ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            this.ctx.lineWidth = 1.5;
+            for(let i = 0; i < 3; i++) {
+                const lineY = bounds.y + bounds.height/2 - 4 + i*4;
+                this.ctx.beginPath();
+                this.ctx.moveTo(bounds.x + 20, lineY);
+                this.ctx.lineTo(bounds.x + bounds.width - 20, lineY);
+                this.ctx.stroke();
+            }
+            this.ctx.restore();
+        }
+        
+        isPointInRect(x, y, rect) {
+            return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+        }
+
+        getDrawerHandleBounds() {
+            const handleWidth = 100;
+            return { x: this.canvas.width / 2 - handleWidth / 2, y: 0, width: handleWidth, height: this.DRAWER_HANDLE_HEIGHT };
+        }
+
+        getScrollbarMetrics() {
+            const firstWhiteKey = this.keys.find(k => !k.isBlack);
+            if (!firstWhiteKey || !firstWhiteKey.width) return { totalWidth: 0, handleWidth: 0, trackWidth: 0 };
+            const totalWidth = this.WHITE_KEYS_COUNT * firstWhiteKey.width;
+            const trackWidth = this.canvas.width;
+            const handleWidth = Math.max(20, (trackWidth / totalWidth) * trackWidth);
+            return { totalWidth, handleWidth, trackWidth };
+        }
+
+        getScrollbarHandleBounds() {
+            const { totalWidth, handleWidth, trackWidth } = this.getScrollbarMetrics();
+            if (totalWidth <= trackWidth) return { x: 0, y: this.canvas.height - this.SCROLLBAR_HEIGHT, width: 0, height: 0 };
+            const maxScroll = totalWidth - trackWidth;
+            const maxHandleTravel = trackWidth - handleWidth;
+            const handleX = (this.scrollOffset / maxScroll) * maxHandleTravel;
+            return { x: handleX, y: this.canvas.height - this.SCROLLBAR_HEIGHT, width: handleWidth, height: this.SCROLLBAR_HEIGHT };
+        }
+
+        drawScrollbar() {
+            const y = this.canvas.height - this.SCROLLBAR_HEIGHT;
+            const trackRadius = 8;
+            this.ctx.save();
+            this.ctx.fillStyle = '#cccccc';
+            this.ctx.beginPath();
+            this.ctx.roundRect(0, y, this.canvas.width, this.SCROLLBAR_HEIGHT, trackRadius);
+            this.ctx.fill();
+            const { totalWidth, handleWidth } = this.getScrollbarMetrics();
+            if (totalWidth > this.canvas.width) {
+                const handleBounds = this.getScrollbarHandleBounds();
+                const handleRadius = 6;
+                this.ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+                this.ctx.beginPath();
+                this.ctx.roundRect(handleBounds.x + 4, handleBounds.y + 4, handleBounds.width - 8, handleBounds.height - 8, handleRadius);
+                this.ctx.fill();
+            }
+            this.ctx.restore();
+        }
+
+        drawDrawerScrollbar() {
+            // To be implemented
+        }
+
+        clampDrawerScroll() {
+            // To be implemented
+        }
+
+        // --- Settings Persistence ---
+        saveSettings() {
+            try {
+                localStorage.setItem(`piano-settings-${this.canvasId}`, JSON.stringify(this.settings));
+            } catch (e) {
+                console.error("Could not save settings to localStorage.", e);
+            }
+            this.onSettingsChange(this.settings);
+        }
+
+        loadSettings() {
+            try {
+                const savedSettings = localStorage.getItem(`piano-settings-${this.canvasId}`);
+                if (savedSettings) {
+                    this.settings = JSON.parse(savedSettings);
+                    this.updateControlsFromSettings();
+                }
+            } catch (e) {
+                console.error("Could not load settings from localStorage.", e);
+            }
+        }
+
+        updateControlsFromSettings() {
+            this.volumeSlider.value = this.settings.volume;
+            this.minVelocitySlider.value = this.settings.minVelocity;
+            this.maxVelocitySlider.value = this.settings.maxVelocity;
+        }
+
+        updateSettingsFromControls() {
+            this.settings.volume = this.volumeSlider.value;
+            this.settings.minVelocity = this.minVelocitySlider.value;
+            this.settings.maxVelocity = this.maxVelocitySlider.value;
+        }
+    }
+
+    // --- DEMO APPLICATION ---
+    document.addEventListener('DOMContentLoaded', () => {
+        const canvas = document.getElementById('piano-keyboard-canvas');
+        const midiOutputsSelect = document.getElementById('midi-outputs');
+        let midiOutput = null;
+        let midiAccess = null;
+
+        function sendMidiMessage(message, deviceName = "internal") {
+            const messageHex = Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+            // console.log(`MIDI from ${deviceName}: [${messageHex}]`);
+            if (midiOutput) {
+                midiOutput.send(message);
+            }
+        }
+
+        function onSettingsChange(settings) {
+            console.log("Settings changed:", settings);
+        }
+
+        const piano = new PianoKeyboard({ 
+            canvas: canvas, 
+            midiCallback: sendMidiMessage,
+            onSettingsChange: onSettingsChange
+        });
+
+        function onMidiMessage(event) {
+            piano.handleExternalMidiMessage(event.data, event.target.name);
+        }
+
+        function setupMidiListeners() {
+            if (!midiAccess) return;
+            midiAccess.inputs.forEach(input => {
+                input.onmidimessage = onMidiMessage;
+                console.log(`Listening for MIDI input on: ${input.name}`);
+            });
+        }
+        
+        function updateDeviceLists() {
+            if (!midiAccess) return;
+            const outputs = midiAccess.outputs.values();
+            midiOutputsSelect.innerHTML = '';
+            let firstOutput = true;
+            for (const output of outputs) {
+                const option = document.createElement('option');
+                option.value = output.id;
+                option.textContent = output.name;
+                midiOutputsSelect.appendChild(option);
+                if (firstOutput) {
+                    midiOutput = output;
+                    firstOutput = false;
+                }
+            }
+            if (midiOutputsSelect.options.length === 0) {
+                 midiOutputsSelect.innerHTML = '<option>No MIDI devices found</option>';
+                 midiOutput = null;
+            } else {
+                 midiOutput = midiAccess.outputs.get(midiOutputsSelect.value);
+            }
+            setupMidiListeners();
+        }
+
+        function onMIDISuccess(ma) {
+            midiAccess = ma;
+            updateDeviceLists();
+            midiAccess.onstatechange = (event) => {
+                console.log(`MIDI device state changed: ${event.port.name}, ${event.port.state}`);
+                updateDeviceLists();
+            };
+        }
+
+        function onMIDIFailure(msg) {
+            console.error(`Failed to get MIDI access - ${msg}`);
+            midiOutputsSelect.innerHTML = '<option>MIDI Access Failed</option>';
+        }
+
+        if (navigator.requestMIDIAccess) {
+            navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
+        } else {
+            console.warn('WebMIDI is not supported in this browser.');
+        }
+        
+        midiOutputsSelect.addEventListener('change', () => {
+            if (midiAccess) {
+                midiOutput = midiAccess.outputs.get(midiOutputsSelect.value);
+            }
+        });
+    });
+
+    </script>
+</body>
+</html>
