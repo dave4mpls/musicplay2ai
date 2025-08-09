@@ -1,6 +1,9 @@
 /**
  * TabControl Component
  * A horizontal tab control to organize settings in the piano keyboard drawer.
+ * Expectations:
+ *  - The active tab should be the same color as the drawer, and the inactive tabs should be darker.
+ *  - The background of the control that does not involve a tab should be white.
  */
 class TabControl {
     constructor(config) {

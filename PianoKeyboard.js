@@ -23,6 +23,9 @@ import { TabControl } from './TabControl.js';
  * - The keyboard should have a scrollbar for navigating keys when the canvas width is smaller than the total key width.
  * - The drawer should pan when touched or dragged, allowing users to scroll through settings controls both horizontally and vertically.
  * - The drawer should have a handle that indicates it can be opened or closed.
+ * - When you pull down the drawer, the drawer handle should move down and still be over the top of the keys.  
+ * - The tab bar should render at the top of the drawer, but it is scrollable like the rest of the drawer components.
+ * - When you add a tab to the tab control, it should be clickable and only the controls for that tab should be visible.
  */
 class PianoKeyboard {
     constructor(config) {
@@ -120,23 +123,27 @@ class PianoKeyboard {
             }
 
             if (this.isDrawerOpen) {
-                const drawerContentY = this.DRAWER_HANDLE_HEIGHT;
+                const drawerContentY = 0; // Content area now starts at the top
+
+                // Check for interactions within the drawer's content area (tabs, controls, panning)
+                if (y > drawerContentY && y < this.calculatedDrawerContentHeight) {
+                    const relativeX = x;
+                    const relativeY = y - drawerContentY + this.drawerScrollOffsetY;
+
                     // Check if a tab is clicked
-                    const tab = this.tabControl.getTabAt(x, y);
+                    const tab = this.tabControl.getTabAt(relativeX, relativeY);
                     if (tab) {
                         this.tabControl.setActiveTab(tab.id);
                         this.draw();
                         return;
-                }
-                if (y > drawerContentY && y < drawerContentY + this.calculatedDrawerContentHeight) {
-                    const controlX = x;
-                    const controlY = y - drawerContentY + this.drawerScrollOffsetY;
-                    
+                    }
+
+                    // Check if a control (slider) is clicked
                     let controlInteracted = false;
                     for (const control of this.controls) {
-                        if (control.isPointOnControl(controlX, controlY)) {
+                        if (control.isPointOnControl(relativeX, relativeY)) {
                             this.activeTouches.set(id, { type: 'control', control: control });
-                            control.updateValueFromPosition(controlX);
+                            control.updateValueFromPosition(relativeX);
                             this.updateSettingsFromControls();
                             controlInteracted = true;
                             break;
@@ -144,6 +151,7 @@ class PianoKeyboard {
                     }
                     if (controlInteracted) { this.draw(); continue; }
 
+                    // If nothing else was hit, it's a pan
                     this.activeTouches.set(id, { type: 'drawerPan', lastY: y });
                     this.draw();
                     continue;
