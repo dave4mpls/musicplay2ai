@@ -348,6 +348,8 @@
             this.height = config.height || 28;
             this.onClick = config.onClick || (() => {});
             this.isActive = config.isActive || (() => false);
+            this.autoSize = config.autoSize || false;
+            this.padding = config.padding || 20; // Horizontal padding (10px on each side)
         }
 
         getBounds() {
@@ -398,6 +400,15 @@
         isPointOnControl(x, y) {
             return this.isPointInRect(x, y, this.getBounds());
         }
+        updateWidth() {
+            if (this.autoSize) {
+                this.ctx.save();
+                this.ctx.font = this.font;
+                const textMetrics = this.ctx.measureText(this.label);
+                this.width = textMetrics.width + this.padding;
+                this.ctx.restore();
+            }
+        }
     }
 
     // NOTE: Dropdown and PopupSlider are more complex "Overlay" controls.
@@ -424,7 +435,7 @@
 
         getBounds(canvasHeight) {
             const optionHeight = 25;
-            const scrollbarWidth = 10;
+            const scrollbarWidth = 18;
             const dropdownPadding = 10;
             const maxDropdownHeight = canvasHeight - (this.y + this.height) - dropdownPadding;
             const calculatedDropdownHeight = (this.options.length * optionHeight);
@@ -527,12 +538,12 @@
         onPointerDown(x, y, owner) {
             const bounds = this.getBounds(this.ctx.canvas.height);
 
-            // Clicked outside the control while it was open
-            if (this.isOpen && owner !== this) {
+            // If the dropdown is open and the click is NOT on the control, close it.
+            if (this.isOpen && !this.isPointOnControl(x, y)) {
                 this.isOpen = false;
                 return { action: 'release' };
             }
-            
+
             // Click on the main button
             if (this.isPointInRect(x, y, bounds.main)) {
                 this.isOpen = !this.isOpen;
@@ -542,18 +553,22 @@
 
             // Click within the open dropdown
             if (this.isOpen) {
-                // Check for scrollbar drag
+                // Check for scrollbar drag first
                 if (bounds.scrollbar && this.isPointInRect(x, y, bounds.scrollbar.handle)) {
                     this.isDraggingScrollbar = true;
                     this.scrollbarDragStartY = y - bounds.scrollbar.handle.y;
                     return { action: 'persist' }; // Keep capture
                 }
+                
+                // Then, check for an option selection.
+                // We check if the click is below the main button and within its width,
+                // which is more reliable than using bounds.dropdown, whose height can be miscalculated.
+                if (x >= bounds.main.x && x <= bounds.main.x + bounds.main.width && y >= bounds.dropdown.y) {
+                    const contentRelativeY = y - bounds.dropdown.y + this.scrollOffset;
+                    const optionIndex = Math.floor(contentRelativeY / 25); // 25 is option height
 
-                // Check for option selection
-                const contentRelativeY = y - bounds.dropdown.y + this.scrollOffset;
-                const optionIndex = Math.floor(contentRelativeY / 25);
-                if (optionIndex >= 0 && optionIndex < this.options.length) {
-                    if (this.isPointInRect(x, y, bounds.dropdown)) {
+                    // Ensure the calculated index is valid before selecting
+                    if (optionIndex >= 0 && optionIndex < this.options.length) {
                         this.selectedValue = this.options[optionIndex].value;
                         this.onSelect(this.selectedValue);
                         this.onStateChange(this);
@@ -834,9 +849,10 @@
             
             this.HANDLE_HEIGHT = config.handleHeight;
             this.TAB_HEIGHT = config.tabHeight;
-            this.SCROLLBAR_SIZE = 10;
+            this.SCROLLBAR_SIZE = 18;
             this.CONTROL_PADDING = { x: 20, y: 20 };
             this.CONTROL_SPACING = { x: 20, y: 25 };
+            this.handleEvent = this.handleEvent.bind(this);
         }
         
         getHeight() { return this.calculatedHeight; }
@@ -845,11 +861,77 @@
         
         // This is the primary event handling method for the drawer
         handleEvent(event) {
+            
+            if (this.eventBroker.capturedControl) {
+                // If a control is captured, we need to adjust the coordinates
+                event.x += this.scrollOffsetX;
+                event.y += this.scrollOffsetY;
+            }
             const { x, y } = event;
+
+            // --- PRIORITY 0: Handle "click outside" for captured controls ---
+            // This is the new logic. If a control is captured but the click is
+            // outside the drawer's bounds, we tell the control it was a global click.
+            if (this.eventBroker.capturedControl && !this.isPointInBounds(x, y)) {
+                // We pass the original event, but signal it's a global click by setting the owner to null.
+                const globalClickEvent = { ...event, owner: null };
+                this.eventBroker.dispatchEvent(globalClickEvent, this.eventBroker.capturedControl);
+                return;
+            }
+
+            // --- PRIORITY 1: Handle events for a captured control (if click was inside) ---
+            if (this.eventBroker.capturedControl) {
+                this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
+                return;
+            }
+
+            // --- PRIORITY 2: Handle ONGOING drawer-level interactions (scroll/pan) ---
+            if (this.activeInteraction) {
+                if (event.type === 'pointermove') {
+                    // ... (rest of the switch statement for pan/scroll remains the same)
+                    switch(this.activeInteraction.type) {
+                        case 'pan':
+                            this.scrollOffsetX -= (x - this.activeInteraction.lastX);
+                            this.scrollOffsetY -= (y - this.activeInteraction.lastY);
+                            this.clampScroll();
+                            this.activeInteraction.lastX = x; this.activeInteraction.lastY = y;
+                            break;
+                        case 'v-scroll': {
+                            const { contentHeight, visibleHeight } = this.getContentDimensions();
+                            const { track, handle } = this.getScrollbarBounds().v;
+                            if (!track || !handle) break;
+                            const scrollableDist = contentHeight - visibleHeight;
+                            const draggableDist = track.height - handle.height;
+                            if (draggableDist <= 0) break;
+                            const ratio = scrollableDist / draggableDist;
+                            const dy = y - this.activeInteraction.startY;
+                            this.scrollOffsetY = this.activeInteraction.startScroll + dy * ratio;
+                            this.clampScroll();
+                            break;
+                        }
+                        case 'h-scroll': {
+                            const { contentWidth, visibleWidth } = this.getContentDimensions();
+                            const { track, handle } = this.getScrollbarBounds().h;
+                            if (!track || !handle) break;
+                            const scrollableDist = contentWidth - visibleWidth;
+                            const draggableDist = track.width - handle.width;
+                            if (draggableDist <= 0) break;
+                            const ratio = scrollableDist / draggableDist;
+                            const dx = x - this.activeInteraction.startX;
+                            this.scrollOffsetX = this.activeInteraction.startScroll + dx * ratio;
+                            this.clampScroll();
+                            break;
+                        }
+                    }
+                } else if (event.type === 'pointerup') {
+                    this.activeInteraction = null;
+                }
+                return;
+            }
+
+            // --- PRIORITY 3: Delegate to controls if no interaction is active ---
             const pointerXInDrawer = x + this.scrollOffsetX;
             const pointerYInDrawer = y + this.scrollOffsetY;
-            
-            // --- Event Delegation to Controls ---
             const controls = this.tabs[this.activeTab];
             let controlUnderPointer = null;
             for (const control of controls) {
@@ -860,14 +942,14 @@
             }
 
             if (controlUnderPointer) {
-                 // Pass the event to the control that's under the pointer
-                 const controlEvent = { ...event, x: pointerXInDrawer, y: pointerYInDrawer };
+                 const controlEvent = { ...event, x: pointerXInDrawer, y: pointerYInDrawer, owner: controlUnderPointer };
                  this.eventBroker.dispatchEvent(controlEvent, controlUnderPointer);
-                 return; // Control handled the event
+                 return;
             }
-            
-            // --- Drawer-specific Interactions (if no control was hit) ---
+
+            // --- PRIORITY 4: Handle NEW drawer-level interactions ---
             if (event.type === 'pointerdown') {
+                // ... (rest of the logic for starting a new scroll/pan/tab-click remains the same)
                 const scrollbarBounds = this.getScrollbarBounds();
                 if (scrollbarBounds.v.handle && this.isPointInRect(x, y, scrollbarBounds.v.handle)) {
                     this.activeInteraction = { type: 'v-scroll', startY: y, startScroll: this.scrollOffsetY };
@@ -883,93 +965,77 @@
                     this.updateHeight();
                     return;
                 }
-                
+
+                const { totalTabWidth, visibleWidth } = this.getContentDimensions();
+                const tabsShouldScroll = totalTabWidth > visibleWidth;
+                const pointerXForTabs = tabsShouldScroll ? pointerXInDrawer : x;
                 const tabBounds = this.getTabBounds();
+
                 for (const tabName in tabBounds) {
-                    if (this.isPointInRect(pointerXInDrawer, y, tabBounds[tabName])) {
+                    if (this.isPointInRect(pointerXForTabs, y, tabBounds[tabName])) {
                         if (this.activeTab !== tabName) {
                             this.activeTab = tabName;
-                            this.scrollOffsetX = 0; this.scrollOffsetY = 0;
+                            this.scrollOffsetX = 0;
+                            this.scrollOffsetY = 0;
                             this.updateHeight();
                             this.onStateChange();
                         }
                         return;
                     }
                 }
-                
-                // If nothing else was clicked, start panning
+
                 this.activeInteraction = { type: 'pan', lastX: x, lastY: y };
             }
-            else if (event.type === 'pointermove') {
-                 if (!this.activeInteraction) return;
-
-                switch(this.activeInteraction.type) {
-                    case 'pan':
-                        this.scrollOffsetX -= (x - this.activeInteraction.lastX);
-                        this.scrollOffsetY -= (y - this.activeInteraction.lastY);
-                        this.clampScroll();
-                        this.activeInteraction.lastX = x; this.activeInteraction.lastY = y;
-                        break;
-                    case 'v-scroll': {
-                        const { contentHeight, visibleHeight } = this.getContentDimensions();
-                        const { track, handle } = this.getScrollbarBounds().v;
-                        if (!track || !handle) break;
-                        const scrollableDist = contentHeight - visibleHeight;
-                        const draggableDist = track.height - handle.height;
-                        if (draggableDist <= 0) break;
-                        const ratio = scrollableDist / draggableDist;
-                        const dy = y - this.activeInteraction.startY;
-                        this.scrollOffsetY = this.activeInteraction.startScroll + dy * ratio;
-                        this.clampScroll();
-                        break;
-                    }
-                    case 'h-scroll': {
-                        const { contentWidth, visibleWidth } = this.getContentDimensions();
-                        const { track, handle } = this.getScrollbarBounds().h;
-                        if (!track || !handle) break;
-                        const scrollableDist = contentWidth - visibleWidth;
-                        const draggableDist = track.width - handle.width;
-                        if (draggableDist <= 0) break;
-                        const ratio = scrollableDist / draggableDist;
-                        const dx = x - this.activeInteraction.startX;
-                        this.scrollOffsetX = this.activeInteraction.startScroll + dx * ratio;
-                        this.clampScroll();
-                        break;
-                    }
-                }
-            }
-            else if (event.type === 'pointerup') {
-                this.activeInteraction = null;
-            }
         }
-
+                
         draw() {
             const diff = this.targetHeight - this.calculatedHeight;
             if (Math.abs(diff) > 1) { this.calculatedHeight += diff * 0.2; } 
             else { this.calculatedHeight = this.targetHeight; }
 
             const drawerContentHeight = this.calculatedHeight - this.HANDLE_HEIGHT;
-            
+            const { totalTabWidth, visibleWidth } = this.getContentDimensions();
+            const tabsShouldScroll = totalTabWidth > visibleWidth;
+
+            // --- Main Background ---
             this.ctx.save();
             this.ctx.fillStyle = '#e0e0e0';
             this.ctx.fillRect(0, 0, this.canvas.width, this.calculatedHeight);
-            
-            if (drawerContentHeight > 0) {
+
+            // --- Draw Controls (Always Scrolled) ---
+            if (drawerContentHeight > this.TAB_HEIGHT) {
                 this.ctx.save();
+                // Clip only the area for controls, below the tabs
                 this.ctx.beginPath();
-                this.ctx.rect(0, 0, this.canvas.width, drawerContentHeight);
+                this.ctx.rect(0, this.TAB_HEIGHT, this.canvas.width, drawerContentHeight - this.TAB_HEIGHT);
                 this.ctx.clip();
+                // Translate for scrolling
                 this.ctx.translate(-this.scrollOffsetX, -this.scrollOffsetY);
-                this.drawTabs();
                 this.drawControls();
                 this.ctx.restore();
             }
-            
+
+            // --- Draw Tabs (Only if drawer is open) ---
+            if (this.isOpen) {
+                this.ctx.save();
+                // Clip just the tab area
+                this.ctx.beginPath();
+                this.ctx.rect(0, 0, this.canvas.width, this.TAB_HEIGHT);
+                this.ctx.clip();
+                // Only apply horizontal translation if tabs need to scroll
+                if (tabsShouldScroll) {
+                    this.ctx.translate(-this.scrollOffsetX, 0);
+                }
+                this.drawTabs();
+                this.ctx.restore();
+            }
+
+            // --- Draw Scrollbars and Handle (Always Fixed) ---
             this.drawScrollbars();
             this.drawHandle();
             this.ctx.restore();
         }
-        
+
         // The event broker will tell us which control needs an overlay
         drawOverlay(control) {
              if (control) {
@@ -999,7 +1065,12 @@
             this.ctx.lineWidth = 1;
             this.ctx.beginPath();
             this.ctx.moveTo(0, this.TAB_HEIGHT - 0.5);
-            this.ctx.lineTo(this.getContentDimensions().contentWidth, this.TAB_HEIGHT - 0.5);
+            
+            // Get both content and visible (canvas) width
+            const { contentWidth, visibleWidth } = this.getContentDimensions();
+            // Draw the line to whichever width is greater
+            this.ctx.lineTo(Math.max(contentWidth, visibleWidth), this.TAB_HEIGHT - 0.5);
+
             this.ctx.stroke();
             this.ctx.restore();
         }
@@ -1053,6 +1124,10 @@
             let yPos = this.TAB_HEIGHT + this.CONTROL_PADDING.y;
             
             for (const control of controls) {
+                // Before laying out, ask the control to update its width if it can.
+                if (typeof control.updateWidth === 'function') {
+                    control.updateWidth();
+                }
                 let cWidth = (control instanceof ToggleSwitch) ? control.getFullWidth() : control.width;
                 control.x = xPos; 
                 control.y = yPos;
@@ -1084,7 +1159,18 @@
             const controls = this.tabs[this.activeTab];
             const visibleWidth = this.canvas.width;
             const visibleHeight = this.calculatedHeight - this.HANDLE_HEIGHT;
-            if (controls.length === 0) return { contentWidth: 0, contentHeight: 0, visibleWidth, visibleHeight };
+
+            // Calculate total tab width
+            const tabBounds = this.getTabBounds();
+            let totalTabWidth = 0;
+            for (const tabName in tabBounds) {
+                const bounds = tabBounds[tabName];
+                totalTabWidth = Math.max(totalTabWidth, bounds.x + bounds.width);
+            }
+
+            if (controls.length === 0) {
+                return { contentWidth: 0, contentHeight: 0, visibleWidth, visibleHeight, totalTabWidth };
+            }
             
             this.layoutControls(controls);
             let maxW = 0, maxH = 0;
@@ -1094,7 +1180,7 @@
                 maxH = Math.max(maxH, c.y + c.height);
             });
             
-            return { contentWidth: maxW, contentHeight: maxH, visibleWidth, visibleHeight };
+            return { contentWidth: maxW, contentHeight: maxH, visibleWidth, visibleHeight, totalTabWidth };
         }
 
         getScrollbarBounds() {
@@ -1261,8 +1347,8 @@
 
             return {
                 'File': [
-                    new ButtonControl({ ctx: this.ctx, label: 'Load MIDI File', onClick: () => console.log('Load'), onStateChange }),
-                    new ButtonControl({ ctx: this.ctx, label: 'Save MIDI File', onClick: () => console.log('Save'), onStateChange }),
+                    new ButtonControl({ ctx: this.ctx, autoSize: true, label: 'Load MIDI File', onClick: () => console.log('Load'), onStateChange }),
+                    new ButtonControl({ ctx: this.ctx, autoSize: true, label: 'Save MIDI File', onClick: () => console.log('Save'), onStateChange }),
                 ],
                 'Edit': [
                     new ButtonControl({ ctx: this.ctx, label: 'Add', isActive: () => this.state.mode === 'add', onClick: () => this.state.mode = 'add', onStateChange }),
@@ -1292,16 +1378,13 @@
             this.canvas.addEventListener('pointerdown', (e) => {
                 e.preventDefault();
                 const event = { type: 'pointerdown', ...this.getCanvasCoordinates(e) };
-                
-                // If a control is captured, an outside click releases it
-                if (this.eventBroker.capturedControl && !this.drawer.isPointInBounds(event.x, event.y)) {
-                    this.eventBroker.handleGlobalClick(event);
-                    return;
-                }
 
-                if (this.drawer.isPointInBounds(event.x, event.y)) {
+                // If a control is captured OR the click is inside the drawer,
+                // let the drawer handle it. This is now consistent with pointermove.
+                if (this.eventBroker.capturedControl || this.drawer.isPointInBounds(event.x, event.y)) {
                     this.drawer.handleEvent(event);
                 } else {
+                    // This only runs for clicks on the background grid.
                     this.activeGridInteraction = true;
                     this.changeCellColor(event.x, event.y);
                 }
@@ -1309,46 +1392,39 @@
 
             window.addEventListener('pointermove', (e) => {
                 const event = { type: 'pointermove', ...this.getCanvasCoordinates(e) };
-                
-                // Captured controls get priority
-                if (this.eventBroker.capturedControl) {
+
+                // If a control is captured or a drawer interaction is active, the drawer handles it.
+                if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
                     e.preventDefault();
-                    this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
-                } else if (this.drawer.activeInteraction) {
-                     e.preventDefault();
-                     this.drawer.handleEvent(event);
+                    this.drawer.handleEvent(event);
                 } else if (this.activeGridInteraction) {
                     this.changeCellColor(event.x, event.y);
-                } else {
-                    // Hover effects for non-captured controls
-                     if (this.drawer.isPointInBounds(event.x, event.y)) {
-                        this.drawer.handleEvent(event); // Let drawer find the control
-                    }
+                } else if (this.drawer.isPointInBounds(event.x, event.y)) {
+                    // Also handle hover effects by passing the event to the drawer.
+                    this.drawer.handleEvent(event);
                 }
             });
 
             window.addEventListener('pointerup', (e) => {
                  const event = { type: 'pointerup', ...this.getCanvasCoordinates(e) };
-                 
-                 if (this.eventBroker.capturedControl) {
+                 // Let the drawer handle all pointerup events that might concern it.
+                 if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
                      e.preventDefault();
-                     this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
-                 } else if (this.drawer.activeInteraction) {
-                      this.drawer.handleEvent(event);
+                     this.drawer.handleEvent(event);
                  }
-                
                 this.activeGridInteraction = false;
             });
 
             this.canvas.addEventListener('wheel', (e) => {
                 const event = { type: 'wheel', deltaY: e.deltaY, ...this.getCanvasCoordinates(e) };
+                // Let the drawer handle wheel events if a control is captured.
                 if (this.eventBroker.capturedControl) {
                     e.preventDefault();
-                    this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
+                    this.drawer.handleEvent(event);
                 }
             }, { passive: false });
         }
-        
+
         onStateChange(control) {
             // A central place to update the main app state if needed
             // For example: this.state.bpm = control.value;
