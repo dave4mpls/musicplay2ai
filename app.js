@@ -47,6 +47,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize the WebAudioTinySynth
     const synth = new WebAudioTinySynth({quality:1, useReverb:1});
+    window.synth = synth;
+
+    const unlockAudio = () => {
+        if (synth.audioContext && synth.audioContext.state === 'suspended') {
+            synth.audioContext.resume();
+        }
+        document.body.removeEventListener('click', unlockAudio);
+        document.body.removeEventListener('touchstart', unlockAudio);
+        document.body.removeEventListener('keydown', unlockAudio);
+    };
+    document.body.addEventListener('click', unlockAudio);
+    document.body.addEventListener('touchstart', unlockAudio);
+    document.body.addEventListener('keydown', unlockAudio);
+
+    const noteOn = (note) => {
+        synth.noteOn(note.channel || 0, note.pitch, note.velocity);
+    };
+    const noteOff = (note) => {
+        synth.noteOff(note.channel || 0, note.pitch);
+    };
+    const sendMidiMessage = (msg) => {
+        synth.send(msg);
+    }
+    window.onPlayNote = noteOn;
+    window.onStopNote = noteOff;
+    window.onMidiMessage = sendMidiMessage;
+    
+    // Initialize Piano Roll
+    const pianoRoll = new PianoRoll(pianoRollCanvas,{ 
+        synth: synth,
+        onPlayNote: noteOn,
+        onStopNote: noteOff,
+        onMidiMessage: sendMidiMessage,
+        bpm: 120
+    });
+
 
     // This function will now be the central point for MIDI routing.
     function handleMidiMessage(message, deviceName = "internal") {
@@ -61,12 +97,6 @@ document.addEventListener('DOMContentLoaded', () => {
             midiOutput.send(message);
         }
     }
-
-    // Initialize Piano Roll
-    const pianoRoll = new PianoRoll({ 
-        canvas: pianoRollCanvas,
-        synth: synth
-    });
 
     // Initialize Keyboard, passing the central MIDI handler as its callback.
     const keyboard = new PianoKeyboard({ 
