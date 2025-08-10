@@ -1,51 +1,87 @@
-const dragger = document.getElementById('dragger');
-const topRow = document.getElementById('topRow');
-const bottomRow = document.getElementById('bottomRow');
-const contentWrapper = document.querySelector('.content-wrapper');
+document.addEventListener('DOMContentLoaded', () => {
+    const dragger = document.getElementById('dragger');
+    const topRow = document.getElementById('topRow');
+    const bottomRow = document.getElementById('bottomRow');
+    const contentWrapper = document.querySelector('.content-wrapper');
 
-let isDragging = false;
-let midiOutput = null; 
+    let isDragging = false;
+    let midiOutput = null; 
 
-const startDragging = (e) => {
-    isDragging = true;
-    document.body.style.cursor = 'ns-resize';
-};
+    // --- Dragger Logic ---
+    const startDragging = (e) => {
+        isDragging = true;
+        document.body.style.cursor = 'ns-resize';
+    };
 
-const stopDragging = () => {
-    isDragging = false;
-    document.body.style.cursor = 'default';
-};
+    const stopDragging = () => {
+        isDragging = false;
+        document.body.style.cursor = 'default';
+    };
 
-const onDrag = (e) => {
-    if (!isDragging) return;
+    const onDrag = (e) => {
+        if (!isDragging) return;
 
-    const clientY = e.clientY || e.touches[0].clientY;
-    const contentWrapperRect = contentWrapper.getBoundingClientRect();
-    const newTopHeight = clientY - contentWrapperRect.top;
+        const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+        if (clientY === undefined) return;
 
-    if (newTopHeight > 20 && newTopHeight < contentWrapper.clientHeight - 10) {
-        const newTopFlexBasis = (newTopHeight / contentWrapper.clientHeight) * 100;
-        topRow.style.flexBasis = `${newTopFlexBasis}%`;
+        const contentWrapperRect = contentWrapper.getBoundingClientRect();
+        const newTopHeight = clientY - contentWrapperRect.top;
+
+        if (newTopHeight > 20 && newTopHeight < contentWrapper.clientHeight - 20) {
+            const newTopFlexBasis = (newTopHeight / contentWrapper.clientHeight) * 100;
+            topRow.style.flexBasis = `${newTopFlexBasis}%`;
+        }
+    };
+
+    dragger.addEventListener('mousedown', startDragging);
+    document.addEventListener('mouseup', stopDragging);
+    document.addEventListener('mousemove', onDrag);
+    dragger.addEventListener('touchstart', startDragging, { passive: false });
+    document.addEventListener('touchend', stopDragging);
+    document.addEventListener('touchmove', onDrag, { passive: false });
+
+
+    // --- Component Initialization ---
+    const keyboardCanvas = document.getElementById('keyboardCanvas');
+    const pianoRollCanvas = document.getElementById('pianoRollCanvas');
+
+    // Initialize the WebAudioTinySynth
+    const synth = new WebAudioTinySynth({quality:1, useReverb:1});
+
+    // This function will now be the central point for MIDI routing.
+    function handleMidiMessage(message, deviceName = "internal") {
+        const messageHex = Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+        console.log(`MIDI from ${deviceName}: [${messageHex}]`);
+        
+        // Send to the Piano Roll's synthesizer
+        pianoRoll.handleMidiMessage(message);
+
+        // If an external MIDI output is selected, send the message there too.
+        if (midiOutput) {
+            midiOutput.send(message);
+        }
     }
-};
 
-function sendMidiMessage(message, deviceName = "internal") {
-    const messageHex = Array.from(message).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
-    console.log(`MIDI from ${deviceName}: [${messageHex}]`);
-    if (midiOutput) {
-        midiOutput.send(message);
-    }
-}
+    // Initialize Piano Roll
+    const pianoRoll = new PianoRoll({ 
+        canvas: pianoRollCanvas,
+        synth: synth
+    });
 
-dragger.addEventListener('mousedown', startDragging);
-document.addEventListener('mouseup', stopDragging);
-document.addEventListener('mousemove', onDrag);
+    // Initialize Keyboard, passing the central MIDI handler as its callback.
+    const keyboard = new PianoKeyboard({ 
+        canvas: keyboardCanvas, 
+        midiCallback: handleMidiMessage 
+    });
 
-dragger.addEventListener('touchstart', startDragging);
-document.addEventListener('touchend', stopDragging);
-document.addEventListener('touchmove', onDrag);
-
-// Initialize keyboard
-const keyboardCanvas = document.getElementById('keyboardCanvas');
-const keyboard = new PianoKeyboard({ canvas: keyboardCanvas, midiCallback: sendMidiMessage });
-keyboard.draw();
+    // Add some default notes to the piano roll for demonstration
+    const defaultNotes = [ 
+        { type: 'noteOn', pitch: 60, velocity: 100, time: 0, channel: 0 }, 
+        { type: 'noteOff', pitch: 60, time: 96, channel: 0 }, 
+        { type: 'noteOn', pitch: 62, velocity: 100, time: 96, channel: 1 }, 
+        { type: 'noteOff', pitch: 62, time: 192, channel: 1 }, 
+        { type: 'noteOn', pitch: 64, velocity: 100, time: 192, channel: 2 }, 
+        { type: 'noteOff', pitch: 64, time: 288, channel: 2 }, 
+    ];
+    pianoRoll.loadFromJson(defaultNotes, 96);
+});

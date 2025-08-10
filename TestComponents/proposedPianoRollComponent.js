@@ -1,0 +1,1006 @@
+    // This piano roll component should not be modified EXCEPT to connect its settings to the Drawer instead of to HTML controls.
+    // In particular no features should be removed, and the piano roll should continue to use the WebAudioTinySynth for sound playback.
+    // The CDN for WebAudioTinySynth is already included in app.html:    
+    //  <script src="https://cdn.jsdelivr.net/npm/webaudio-tinysynth/webaudio-tinysynth.js"></script>
+
+    class PianoRoll {
+        constructor(canvas, options = {}) {
+            this.canvas = canvas;
+            this.ctx = canvas.getContext('2d');
+            this.onPlayNote = options.onPlayNote || (() => {});
+            this.onStopNote = options.onStopNote || (() => {});
+            this.bpm = options.bpm || 120;
+            this.MAX_HISTORY = 25;
+
+            this.config = {
+                noteHeight: 16,
+                beatWidth: 64,
+                totalBeats: 128,
+                totalPitches: 128,
+                keysWidth: 100,
+                scrollbarSize: 14,
+                resizeHandleWidth: 10,
+                timelineHeight: 30,
+                ...this._getCSSColors()
+            };
+
+            this.CHANNEL_COLORS = [
+                '#E57373', '#F06292', '#BA68C8', '#9575CD', '#7986CB', '#64B5F6', 
+                '#4FC3F7', '#4DD0E1', '#4DB6AC', '#81C784', '#AED581', '#DCE775', 
+                '#FFF176', '#FFD54F', '#FFB74D', '#FF8A65'
+            ];
+
+            this.state = {
+                notes: [],
+                ppqn: 96,
+                noteSize: 96,
+                selectedNotes: [],
+                mode: 'add',
+                currentChannel: 0,
+                playOnClick: true,
+                scrollX: 0,
+                scrollY: 0,
+                songDurationTicks: 0,
+                isPlaying: false,
+                playheadTick: 0,
+                lastFrameTime: 0,
+                lookaheadEvents: [],
+                isDragging: false,
+                wasAddingNote: false,
+                isResizing: false,
+                isMarqueeSelecting: false,
+                isDraggingVScroll: false,
+                isDraggingHScroll: false,
+                isPanning: false,
+                isDraggingPlayhead: false,
+                potentialDeselect: false,
+                dragOffsets: [],
+                resizeStartTicks: 0,
+                longPressTimer: null,
+                marquee: { x1: 0, y1: 0, x2: 0, y2: 0 },
+                lastMousePos: { x: 0, y: 0 },
+                undoHistory: [],
+                redoHistory: [],
+                soundOnAdd: null,
+            };
+
+            this.dom = {
+                contextMenu: document.getElementById('contextMenu'),
+                undoBtn: document.getElementById('undoBtn'),
+                redoBtn: document.getElementById('redoBtn'),
+                sizeSelect: document.getElementById('sizeSelect'),
+                tempoDisplay: document.getElementById('tempoDisplay'),
+                tempoControl: document.getElementById('tempoControl'),
+                tempoPopup: document.getElementById('tempoPopup'),
+                tempoSlider: document.getElementById('tempoSlider'),
+            };
+            
+            this._boundOnInteractionMove = this._onInteractionMove.bind(this);
+            this._boundOnInteractionEnd = this._onInteractionEnd.bind(this);
+
+            this._init();
+        }
+
+        // --- PUBLIC API ---
+        loadFromJson(messages, ppqn = 96) { 
+            this.state.ppqn = ppqn; 
+            this.state.notes = this._messagesToNotes(messages); 
+            this._recalculateSongDuration(); 
+            this.draw(); 
+        }
+        getNotesAsJson() { return this._notesToMessages(this.state.notes); }
+        
+        saveToMidi() { 
+            const messages = this.getNotesAsJson(); 
+            const write = (messages, ppqn = 96, bpm = 120) => {
+                const buffer = [
+                    0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 
+                    0x00, 0x01, (ppqn >> 8) & 0xFF, ppqn & 0xFF
+                ]; 
+                const track = []; 
+                let lastTime = 0; 
+                const writeVlq = value => { 
+                    const bytes = []; 
+                    bytes.push(value & 0x7F); 
+                    value >>= 7; 
+                    while (value > 0) { 
+                        bytes.push((value & 0x7F) | 0x80); 
+                        value >>= 7; 
+                    } 
+                    return bytes.reverse(); 
+                }; 
+                const microSecondsPerQuarterNote = Math.round(60000000 / bpm); 
+                track.push(...writeVlq(0), 0xFF, 0x51, 0x03, 
+                           (microSecondsPerQuarterNote >> 16) & 0xFF, 
+                           (microSecondsPerQuarterNote >> 8) & 0xFF, 
+                           microSecondsPerQuarterNote & 0xFF); 
+                messages.forEach(msg => { 
+                    const deltaTime = msg.time - lastTime; 
+                    lastTime = msg.time; 
+                    track.push(...writeVlq(deltaTime)); 
+                    const statusByte = (msg.type === 'noteOn' ? 0x90 : 0x80) | (msg.channel || 0); 
+                    track.push(statusByte, msg.pitch, msg.velocity); 
+                }); 
+                track.push(...writeVlq(0)); 
+                track.push(0xFF, 0x2F, 0x00); 
+                buffer.push(0x4D, 0x54, 0x72, 0x6B); 
+                const trackLength = track.length; 
+                buffer.push((trackLength >> 24) & 0xFF, (trackLength >> 16) & 0xFF, 
+                            (trackLength >> 8) & 0xFF, trackLength & 0xFF); 
+                buffer.push(...track); 
+                return new Uint8Array(buffer).buffer; 
+            }
+            return write(messages, this.state.ppqn, this.bpm); 
+        }
+
+        setMode(mode) { 
+            this.state.mode = mode; 
+            this.canvas.style.cursor = this._getCursorStyle({x:0, y:0}); 
+        }
+        setCurrentChannel(ch) { this.state.currentChannel = ch; }
+        setPlayOnClick(enabled) { this.state.playOnClick = enabled; }
+        play() { 
+            if (this.state.isPlaying) return; 
+            this.state.isPlaying = true; 
+            this.state.lastFrameTime = performance.now(); 
+            this._buildLookaheadEvents(); 
+            requestAnimationFrame(this._playbackLoop.bind(this)); 
+        }
+        pause() { 
+            this.state.isPlaying = false; 
+            this.state.lookaheadEvents.forEach(e => { 
+                if (e.isPlaying) this.onStopNote({ pitch: e.pitch, channel: e.channel }); 
+            }); 
+            this.draw(); 
+        }
+        stop() { this.pause(); this.state.playheadTick = 0; this.draw(); }
+        resizeAndDraw() { this._setupCanvas(); this.draw(); }
+        
+        undo() { 
+            if (this.state.undoHistory.length === 0) return; 
+            this.state.redoHistory.push(JSON.parse(JSON.stringify(this.state.notes))); 
+            this.state.notes = this.state.undoHistory.pop(); 
+            this.state.selectedNotes = []; 
+            this._recalculateSongDuration(); 
+            this._updateUndoRedoButtons(); 
+            this.draw(); 
+        }
+        redo() { 
+            if (this.state.redoHistory.length === 0) return; 
+            this.state.undoHistory.push(JSON.parse(JSON.stringify(this.state.notes))); 
+            this.state.notes = this.state.redoHistory.pop(); 
+            this.state.selectedNotes = []; 
+            this._recalculateSongDuration(); 
+            this._updateUndoRedoButtons(); 
+            this.draw(); 
+        }
+
+        // --- INITIALIZATION & SETUP ---
+        _init() {
+            this._setupCanvas();
+            this._attachEventListeners();
+            this._setupSizeControl();
+            this._setupTempoControl();
+            this._updateUndoRedoButtons();
+            this.draw();
+        }
+
+        _setupSizeControl() {
+            const ppqn = this.state.ppqn;
+            const sizes = [
+                { name: '𝅘𝅥𝅰', value: ppqn / 8 },   // 32nd
+                { name: '𝅘𝅥𝅯', value: ppqn / 4 },   // 16th
+                { name: '♪', value: ppqn / 2 },    // Eighth
+                { name: '♩', value: ppqn },        // Quarter
+                { name: '♩.', value: ppqn * 1.5 }, // Dotted Quarter
+                { name: '𝅗𝅥', value: ppqn * 2 },    // Half
+                { name: '𝅗𝅥.', value: ppqn * 3 },   // Dotted Half
+                { name: '𝅝', value: ppqn * 4 },    // Whole
+            ];
+            sizes.forEach(size => {
+                const option = document.createElement('option');
+                option.value = size.value;
+                option.textContent = size.name;
+                if (size.value === ppqn) {
+                    option.selected = true;
+                }
+                this.dom.sizeSelect.appendChild(option);
+            });
+            this.state.noteSize = parseInt(this.dom.sizeSelect.value);
+            this.dom.sizeSelect.addEventListener('change', (e) => {
+                this.state.noteSize = parseInt(e.target.value);
+            });
+        }
+
+        _setupTempoControl() {
+            this.dom.tempoDisplay.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const isVisible = this.dom.tempoPopup.style.display === 'block';
+                this.dom.tempoPopup.style.display = isVisible ? 'none' : 'block';
+            });
+            this.dom.tempoSlider.addEventListener('input', (e) => {
+                this.bpm = parseInt(e.target.value);
+                this.dom.tempoDisplay.textContent = this.bpm;
+            });
+            document.addEventListener('click', (e) => {
+                if (!this.dom.tempoControl.contains(e.target)) {
+                    this.dom.tempoPopup.style.display = 'none';
+                }
+            });
+        }
+
+        _setupCanvas() { 
+            const dpr = window.devicePixelRatio || 1; 
+            const rect = this.canvas.parentElement.getBoundingClientRect(); 
+            this.canvas.width = rect.width * dpr; 
+            this.canvas.height = rect.height * dpr; 
+            this.ctx.scale(dpr, dpr); 
+            this.canvas.style.width = `${rect.width}px`; 
+            this.canvas.style.height = `${rect.height}px`; 
+        }
+        _getCSSColors() { 
+            const s = getComputedStyle(document.documentElement); 
+            return { 
+                keyWhiteColor: s.getPropertyValue('--key-white'), 
+                keyBlackColor: s.getPropertyValue('--key-black'), 
+                gridBgDark: s.getPropertyValue('--grid-bg-dark'), 
+                gridBgLight: s.getPropertyValue('--grid-bg-light'), 
+                gridLineLight: s.getPropertyValue('--grid-line-light'), 
+                gridLineDark: s.getPropertyValue('--grid-line-dark'), 
+                noteStrokeColor: s.getPropertyValue('--note-stroke'), 
+                noteSelectedStrokeColor: s.getPropertyValue('--note-selected-stroke'), 
+                playheadColor: s.getPropertyValue('--playhead-color'), 
+                scrollbarBg: s.getPropertyValue('--scrollbar-bg'), 
+                scrollbarThumb: s.getPropertyValue('--scrollbar-thumb'), 
+                timelineBg: s.getPropertyValue('--timeline-bg'), 
+                timelineFontColor: s.getPropertyValue('--timeline-font-color') 
+            }; 
+        }
+        _recalculateSongDuration() { 
+            let lastTick = 0; 
+            this.state.notes.forEach(n => { 
+                const endTick = n.start_tick + n.duration_ticks; 
+                if (endTick > lastTick) lastTick = endTick; 
+            }); 
+            this.state.songDurationTicks = lastTick; 
+            this.config.totalBeats = Math.ceil(lastTick / (this.state.ppqn * 4)) * 4 + 32; 
+        }
+
+        // --- EVENT HANDLING ---
+        _attachEventListeners() {
+            const c = this.canvas;
+            c.addEventListener('mousedown', this._onInteractionStart.bind(this));
+            c.addEventListener('touchstart', this._onInteractionStart.bind(this), { passive: false });
+            c.addEventListener('mousemove', this._onHoverMove.bind(this));
+            c.addEventListener('contextmenu', this._onContextMenu.bind(this));
+            c.addEventListener('wheel', this._onWheel.bind(this), { passive: false });
+            document.getElementById('deleteNotes').addEventListener('click', () => { 
+                this._saveStateForUndo(); 
+                this.state.notes = this.state.notes.filter(n => !this.state.selectedNotes.includes(n)); 
+                this.state.selectedNotes = []; 
+                this.state.lookaheadEvents = []; 
+                this._recalculateSongDuration(); 
+                this._hideContextMenu(); 
+                this.draw(); 
+            });
+            document.addEventListener('click', (e) => { 
+                if (e.target.parentElement !== this.dom.contextMenu && 
+                    !this.dom.tempoControl.contains(e.target)) 
+                {
+                    this._hideContextMenu(); 
+                }
+            });
+        }
+        
+        _onInteractionStart(e) {
+            if (e.type === 'mousedown' && e.button !== 0) return;
+            e.preventDefault();
+            this._hideContextMenu();
+            
+            if (e.type === 'touchstart') {
+                this.state.longPressTimer = setTimeout(() => {
+                    this._onContextMenu(e);
+                    this.state.longPressTimer = null;
+                }, 500);
+            }
+            
+            const pos = this._getMousePos(e);
+            
+            window.addEventListener('mousemove', this._boundOnInteractionMove);
+            window.addEventListener('touchmove', this._boundOnInteractionMove, { passive: false });
+            window.addEventListener('mouseup', this._boundOnInteractionEnd);
+            window.addEventListener('touchend', this._boundOnInteractionEnd);
+
+            const isTimelineClick = pos.y < this.config.timelineHeight && 
+                                  pos.x > this.config.keysWidth;
+            const canDragPlayhead = this.state.mode === 'add' || this.state.mode === 'select';
+
+            if (isTimelineClick && canDragPlayhead) {
+                this.state.isDraggingPlayhead = true;
+                this._handlePlayheadDrag(pos);
+                return;
+            }
+
+            if (this.state.mode === 'pan') {
+                this.state.isPanning = true;
+                this.state.lastMousePos = pos;
+                this.canvas.style.cursor = this._getCursorStyle(pos);
+                return;
+            }
+
+            if (this._handleScrollbarMouseDown(pos)) return;
+
+            const isGridClick = pos.x > this.config.keysWidth && 
+                                pos.x < this.canvas.clientWidth - this.config.scrollbarSize;
+            if (isGridClick) {
+                const note = this._getNoteAt(pos.x, pos.y);
+                const isResizeHandle = this._getCursorStyle(pos) === 'ew-resize';
+                
+                if (isResizeHandle && note) {
+                    this._handleResizeMouseDown(note, pos);
+                } else if (note) {
+                    this._handleNoteMouseDown(e, note, pos);
+                } else {
+                    this._handleGridMouseDown(e, pos);
+                }
+            }
+            this.draw();
+        }
+        
+        _onInteractionMove(e) {
+            if (this.state.longPressTimer) {
+                clearTimeout(this.state.longPressTimer);
+                this.state.longPressTimer = null;
+            }
+            if (e.type === 'mousemove' && e.buttons === 0) {
+                this._onInteractionEnd(e);
+                return;
+            }
+
+            e.preventDefault();
+            this.state.potentialDeselect = false;
+            const pos = this._getMousePos(e);
+
+            if (this.state.wasAddingNote) {
+                if (this.state.soundOnAdd) {
+                    clearTimeout(this.state.soundOnAdd.timerId);
+                    this.onStopNote({ pitch: this.state.soundOnAdd.pitch });
+                    this.state.soundOnAdd = null;
+
+                    const halfNoteTicks = this.state.ppqn * 2;
+                    const ticksPerSecond = (this.bpm / 60) * this.state.ppqn;
+                    const halfNoteMs = (halfNoteTicks / ticksPerSecond) * 1000;
+                    const note = this.state.selectedNotes[0];
+                    if (note) {
+                         this.onPlayNote({ 
+                            pitch: note.pitch, velocity: note.velocity, channel: note.channel 
+                         });
+                         const timerId = setTimeout(() => {
+                            this.onStopNote({ pitch: note.pitch });
+                            if (this.state.soundOnAdd && this.state.soundOnAdd.timerId === timerId) {
+                                this.state.soundOnAdd = null;
+                            }
+                        }, halfNoteMs);
+                        this.state.soundOnAdd = { pitch: note.pitch, timerId };
+                    }
+                }
+                
+                this.state.isResizing = true;
+                this.state.wasAddingNote = false;
+                const note = this.state.selectedNotes[0];
+                if (note) {
+                    this.state.resizeStartTicks = note.start_tick;
+                    note.originalDuration = note.duration_ticks;
+                }
+            }
+
+            if (this.state.isDraggingPlayhead) { this._handlePlayheadDrag(pos); }
+            else if (this.state.isPanning) { this._handlePan(pos); }
+            else if (this.state.isDraggingVScroll || this.state.isDraggingHScroll) { 
+                this._handleScrollbarMouseMove(pos); 
+            } 
+            else if (this.state.isDragging) { this._handleNoteDrag(pos); } 
+            else if (this.state.isResizing) { this._handleNoteResize(pos); } 
+            else if (this.state.isMarqueeSelecting) { this._handleMarqueeSelect(pos); } 
+            
+            this.state.lastMousePos = pos;
+        }
+
+        _onInteractionEnd(e) {
+            if (this.state.longPressTimer) {
+                clearTimeout(this.state.longPressTimer);
+                this.state.longPressTimer = null;
+            }
+            
+            if (this.state.soundOnAdd) {
+                clearTimeout(this.state.soundOnAdd.timerId);
+                this.onStopNote({ pitch: this.state.soundOnAdd.pitch });
+                this.state.soundOnAdd = null;
+            }
+
+            if (this.state.potentialDeselect) this.state.selectedNotes = [];
+            if (this.state.isDragging || this.state.isResizing || this.state.wasAddingNote) {
+                this._recalculateSongDuration();
+            }
+            if (this.state.isMarqueeSelecting) this._selectNotesInMarquee();
+            
+            if (this.state.isDragging || this.state.isResizing) {
+                 this.state.selectedNotes = [];
+            }
+            
+            if (this.state.isPanning) {
+                this.state.isPanning = false;
+                this.canvas.style.cursor = this._getCursorStyle(this.state.lastMousePos);
+            }
+
+            this.state.isDraggingPlayhead = false;
+            this.state.isDragging = false;
+            this.state.wasAddingNote = false;
+            this.state.isResizing = false;
+            this.state.isMarqueeSelecting = false;
+            this.state.isDraggingVScroll = false;
+            this.state.isDraggingHScroll = false;
+            this.state.potentialDeselect = false;
+            
+            window.removeEventListener('mousemove', this._boundOnInteractionMove);
+            window.removeEventListener('touchmove', this._boundOnInteractionMove);
+            window.removeEventListener('mouseup', this._boundOnInteractionEnd);
+            window.removeEventListener('touchend', this._boundOnInteractionEnd);
+            
+            this.draw();
+        }
+
+        _onHoverMove(e) {
+            const isInteracting = this.state.isPanning || this.state.isDragging || 
+                                  this.state.isResizing || this.state.isMarqueeSelecting || 
+                                  this.state.isDraggingPlayhead;
+            if (isInteracting) return;
+            const pos = this._getMousePos(e);
+            this.canvas.style.cursor = this._getCursorStyle(pos);
+        }
+
+        _onContextMenu(e) { 
+            e.preventDefault(); 
+            const pos = this._getMousePos(e); 
+            if (pos.y < this.config.timelineHeight || pos.x < this.config.keysWidth) return; 
+            const note = this._getNoteAt(pos.x, pos.y); 
+            if (note && !this.state.selectedNotes.includes(note)) { 
+                this.state.selectedNotes = [note]; 
+                this.draw(); 
+            } 
+            if(this.state.selectedNotes.length > 0) { 
+                const menuPos = this._getMousePos(e, true); 
+                this.dom.contextMenu.style.left = `${menuPos.x}px`; 
+                this.dom.contextMenu.style.top = `${menuPos.y}px`; 
+                this.dom.contextMenu.style.display = 'block'; 
+            } 
+        }
+        _onWheel(e) { 
+            e.preventDefault(); 
+            this.state.scrollX += e.deltaX; 
+            this.state.scrollY += e.deltaY; 
+            this._clampScroll(); 
+            this.draw(); 
+        }
+        
+        // --- DRAWING ---
+        draw() { 
+            const { ctx, canvas } = this; 
+            ctx.clearRect(0, 0, canvas.width, canvas.height); 
+            this._drawTimeline(); 
+            this._drawPianoKeys(); 
+            this._drawGridAndNotes(); 
+            this._drawPlayheadAndMarquee(); 
+            this._drawScrollbars(); 
+        }
+        _drawTimeline() { 
+            const { ctx, canvas, config, state } = this; 
+            const { clientWidth } = canvas; 
+            ctx.fillStyle = config.timelineBg; 
+            ctx.fillRect(0, 0, clientWidth, config.timelineHeight); 
+            ctx.save(); 
+            ctx.translate(config.keysWidth - state.scrollX, 0); 
+            ctx.font = "12px sans-serif"; 
+            ctx.textAlign = "left"; 
+            for (let i = 0; i <= config.totalBeats; i++) { 
+                const x = i * config.beatWidth; 
+                const isMeasureLine = i % 4 === 0; 
+                ctx.strokeStyle = isMeasureLine ? config.gridLineDark : config.gridLineLight; 
+                ctx.fillStyle = config.timelineFontColor; 
+                ctx.beginPath(); 
+                ctx.moveTo(x, isMeasureLine ? 15 : 20); 
+                ctx.lineTo(x, config.timelineHeight); 
+                ctx.stroke(); 
+                if (isMeasureLine) { 
+                    const measureNumber = i / 4 + 1; 
+                    ctx.fillText(measureNumber, x + 4, 12); 
+                } 
+            } 
+            ctx.restore(); 
+            ctx.fillStyle = 'rgba(0,0,0,0.3)'; 
+            ctx.fillRect(0, config.timelineHeight - 1, clientWidth, 2); 
+        }
+        _drawPianoKeys() { 
+            const { ctx, config, state } = this; 
+            const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]; 
+            ctx.save(); 
+            ctx.translate(0, config.timelineHeight - state.scrollY); 
+            for (let i = 0; i < config.totalPitches; i++) { 
+                const y = i * config.noteHeight; 
+                const pitch = config.totalPitches - 1 - i; 
+                const isBlackKey = noteNames[pitch % 12].includes("#"); 
+                ctx.fillStyle = isBlackKey ? config.keyBlackColor : config.keyWhiteColor; 
+                ctx.fillRect(0, y, config.keysWidth, config.noteHeight); 
+                ctx.strokeStyle = config.gridLineDark; 
+                ctx.strokeRect(0, y, config.keysWidth, config.noteHeight); 
+                if (!isBlackKey) { 
+                    ctx.fillStyle = config.keyBlackColor; 
+                    ctx.font = "10px sans-serif"; 
+                    const octave = Math.floor(pitch / 12) - 1; 
+                    ctx.fillText(`${noteNames[pitch % 12]}${octave}`, 5, y + config.noteHeight - 4); 
+                } 
+            } 
+            ctx.restore(); 
+            ctx.fillStyle = 'rgba(0,0,0,0.3)'; 
+            ctx.fillRect(config.keysWidth - 1, config.timelineHeight, 2, 
+                         this.canvas.clientHeight - config.timelineHeight); 
+        }
+        _drawGridAndNotes() { 
+            const { ctx, canvas, config, state } = this; 
+            const { clientWidth, clientHeight } = canvas; 
+            const gridWidth = config.beatWidth * config.totalBeats; 
+            const gridHeight = config.noteHeight * config.totalPitches; 
+            ctx.save(); 
+            ctx.beginPath(); 
+            ctx.rect(config.keysWidth, config.timelineHeight, 
+                     clientWidth - config.keysWidth, clientHeight - config.timelineHeight); 
+            ctx.clip(); 
+            ctx.translate(config.keysWidth - state.scrollX, config.timelineHeight - state.scrollY); 
+            for (let i = 0; i < config.totalPitches; i++) { 
+                const pitch = config.totalPitches - 1 - i; 
+                const isBlackKey = [1, 3, 6, 8, 10].includes(pitch % 12); 
+                ctx.fillStyle = isBlackKey ? config.gridBgDark : config.gridBgLight; 
+                ctx.fillRect(0, i * config.noteHeight, gridWidth, config.noteHeight); 
+            } 
+            for (let i = 0; i <= config.totalBeats; i++) { 
+                const x = i * config.beatWidth; 
+                ctx.strokeStyle = (i % 4 === 0) ? config.gridLineDark : config.gridLineLight; 
+                ctx.beginPath(); 
+                ctx.moveTo(x, 0); 
+                ctx.lineTo(x, gridHeight); 
+                ctx.stroke(); 
+            } 
+            state.notes.forEach(note => { 
+                const rect = this._getNoteRect(note); 
+                const isSelected = state.selectedNotes.includes(note); 
+                ctx.fillStyle = this.CHANNEL_COLORS[note.channel || 0]; 
+                ctx.strokeStyle = isSelected ? config.noteSelectedStrokeColor : config.noteStrokeColor; 
+                ctx.lineWidth = isSelected ? 2.5 : 1.5; 
+                ctx.fillRect(rect.x, rect.y, rect.w, rect.h); 
+                ctx.strokeRect(rect.x, rect.y, rect.w, rect.h); 
+            }); 
+            ctx.restore(); 
+        }
+        _drawPlayheadAndMarquee() { 
+            const { ctx, canvas, config, state } = this; 
+            const x = config.keysWidth + this._tickToPixel(state.playheadTick) - state.scrollX; 
+            if (x >= config.keysWidth && x < canvas.clientWidth) { 
+                ctx.fillStyle = config.playheadColor; 
+                ctx.fillRect(x, 0, 2, canvas.clientHeight); 
+            } 
+            if (state.isMarqueeSelecting) { 
+                const marqueeX = Math.min(state.marquee.x1, state.marquee.x2);
+                const marqueeY = Math.min(state.marquee.y1, state.marquee.y2);
+                const w = Math.abs(state.marquee.x1 - state.marquee.x2);
+                const h = Math.abs(state.marquee.y1 - state.marquee.y2); 
+                ctx.strokeStyle = config.noteSelectedStrokeColor; 
+                ctx.fillStyle = 'rgba(253, 216, 53, 0.2)'; 
+                ctx.lineWidth = 1; 
+                ctx.fillRect(marqueeX, marqueeY, w, h); 
+                ctx.strokeRect(marqueeX, marqueeY, w, h); 
+            } 
+        }
+        _drawScrollbars() { 
+            const { ctx, canvas, config, state } = this; 
+            const { clientWidth, clientHeight } = canvas; 
+            const { scrollX, scrollY } = state; 
+            const contentWidth = config.beatWidth * config.totalBeats; 
+            const contentHeight = config.noteHeight * config.totalPitches; 
+            const viewWidth = clientWidth - config.keysWidth - config.scrollbarSize; 
+            const viewHeight = clientHeight - config.timelineHeight - config.scrollbarSize; 
+            if (contentHeight > viewHeight) { 
+                const trackHeight = clientHeight - config.timelineHeight - config.scrollbarSize; 
+                const thumbHeight = Math.max(20, trackHeight * (viewHeight / contentHeight)); 
+                const thumbY = config.timelineHeight + 
+                               (scrollY / (contentHeight - viewHeight)) * (trackHeight - thumbHeight); 
+                ctx.fillStyle = config.scrollbarBg; 
+                ctx.fillRect(clientWidth - config.scrollbarSize, config.timelineHeight, 
+                             config.scrollbarSize, trackHeight); 
+                ctx.fillStyle = config.scrollbarThumb; 
+                ctx.fillRect(clientWidth - config.scrollbarSize, thumbY, 
+                             config.scrollbarSize, thumbHeight); 
+            } 
+            if (contentWidth > viewWidth) { 
+                const trackWidth = clientWidth - config.keysWidth - config.scrollbarSize; 
+                const thumbWidth = Math.max(20, trackWidth * (viewWidth / contentWidth)); 
+                const thumbX = config.keysWidth + 
+                               (scrollX / (contentWidth - viewWidth)) * (trackWidth - thumbWidth); 
+                ctx.fillStyle = config.scrollbarBg; 
+                ctx.fillRect(config.keysWidth, clientHeight - config.scrollbarSize, 
+                             trackWidth, config.scrollbarSize); 
+                ctx.fillStyle = config.scrollbarThumb; 
+                ctx.fillRect(thumbX, clientHeight - config.scrollbarSize, 
+                             thumbWidth, config.scrollbarSize); 
+            } 
+        }
+        
+        // --- PLAYBACK ---
+        _buildLookaheadEvents() { 
+            const s = this.state; 
+            s.lookaheadEvents = []; 
+            s.notes.forEach(n => { 
+                s.lookaheadEvents.push({ 
+                    type: 'noteOn', tick: n.start_tick, pitch: n.pitch, 
+                    velocity: n.velocity, channel: n.channel, isPlaying: false 
+                }); 
+                s.lookaheadEvents.push({ 
+                    type: 'noteOff', tick: n.start_tick + n.duration_ticks, pitch: n.pitch, channel: n.channel
+                }); 
+            }); 
+            s.lookaheadEvents.sort((a,b) => a.tick - b.tick); 
+        }
+        _playbackLoop(timestamp) { 
+            const s = this.state, c = this.config, canvas = this.canvas; 
+            if (!s.isPlaying) return; 
+
+            // This is the main playback loop driven by requestAnimationFrame for smooth animation
+            const elapsedMs = timestamp - s.lastFrameTime; 
+            s.lastFrameTime = timestamp; 
+            const ticksPerSecond = (this.bpm / 60) * s.ppqn; 
+            const elapsedTicks = (elapsedMs / 1000) * ticksPerSecond; 
+            const newPlayheadTick = s.playheadTick + elapsedTicks; 
+
+            // Find and process all events between the last frame and this one
+            s.lookaheadEvents.forEach(e => { 
+                if (e.tick >= s.playheadTick && e.tick < newPlayheadTick) { 
+                    if (e.type === 'noteOn') { 
+                        this.onPlayNote(e); 
+                        // Mark the event as currently playing to handle note-offs correctly
+                        const onEvent = s.lookaheadEvents.find(ev => 
+                            ev.type === 'noteOn' && ev.tick === e.tick && ev.pitch === e.pitch && ev.channel === e.channel); 
+                        if(onEvent) onEvent.isPlaying = true; 
+                    } else { // noteOff
+                        this.onStopNote(e); 
+                        // Find the corresponding noteOn event and mark it as no longer playing
+                        const onEvent = s.lookaheadEvents.find(ev => 
+                            ev.type === 'noteOn' && ev.tick < e.tick && 
+                            ev.pitch === e.pitch && ev.channel === e.channel && ev.isPlaying); 
+                        if(onEvent) onEvent.isPlaying = false; 
+                    } 
+                } 
+            }); 
+
+            s.playheadTick = newPlayheadTick; 
+
+            // Auto-scroll logic
+            const playheadX = this._tickToPixel(s.playheadTick); 
+            const viewWidth = canvas.clientWidth - c.keysWidth - c.scrollbarSize; 
+            if (playheadX > s.scrollX + viewWidth * 0.8 || playheadX < s.scrollX) {
+                s.scrollX = playheadX - viewWidth * 0.2; 
+            }
+            this._clampScroll(); 
+
+            // Stop playback if the end is reached
+            if (s.playheadTick > s.songDurationTicks) this.stop(); 
+            
+            this.draw(); 
+            requestAnimationFrame(this._playbackLoop.bind(this)); 
+        }
+
+        // --- MOUSE INTERACTION LOGIC ---
+        _handleNoteMouseDown(e, note, pos) { 
+            this._saveStateForUndo(); 
+            const s = this.state; 
+            if (s.playOnClick) { 
+                const originalPitch = note.pitch; 
+                const ticksPerSecond = (this.bpm / 60) * s.ppqn; 
+                const msPerTick = 1000 / ticksPerSecond; 
+                const durationMs = note.duration_ticks * msPerTick; 
+                this.onPlayNote({ 
+                    pitch: originalPitch, velocity: note.velocity, channel: note.channel 
+                }); 
+                setTimeout(() => { this.onStopNote({ pitch: originalPitch, channel: note.channel }); }, durationMs); 
+            } 
+            const isSelected = s.selectedNotes.includes(note); 
+            if (e.shiftKey) { 
+                if (isSelected) s.selectedNotes = s.selectedNotes.filter(n => n !== note); 
+                else s.selectedNotes.push(note); 
+            } else if (isSelected) { 
+                s.potentialDeselect = true; 
+            } else { 
+                s.selectedNotes = [note]; 
+            } 
+            s.isDragging = true; 
+            s.dragOffsets = s.selectedNotes.map(n => ({ 
+                note: n, 
+                pixelOffsetX: this._getGridPos(pos).x - this._tickToPixel(n.start_tick), 
+                pixelOffsetY: this._getGridPos(pos).y - this._pitchToPixel(n.pitch) 
+            })); 
+        }
+        
+        _handleGridMouseDown(e, pos) {
+            const s = this.state;
+            s.selectedNotes = [];
+            if (s.mode === 'add') {
+                this._saveStateForUndo();
+                const gridPos = this._pixelToGrid(this._getGridPos(pos));
+                const newNote = {
+                    pitch: gridPos.pitch,
+                    start_tick: gridPos.tick,
+                    duration_ticks: s.noteSize,
+                    velocity: 100,
+                    channel: s.currentChannel
+                };
+                s.notes.push(newNote);
+                s.selectedNotes = [newNote];
+                s.wasAddingNote = true;
+
+                if (s.playOnClick) {
+                    const ticksPerSecond = (this.bpm / 60) * s.ppqn;
+                    const durationMs = (s.noteSize / ticksPerSecond) * 1000;
+                    this.onPlayNote({ 
+                        pitch: newNote.pitch, velocity: newNote.velocity, channel: newNote.channel 
+                    });
+                    const timerId = setTimeout(() => {
+                        this.onStopNote({ pitch: newNote.pitch, channel: newNote.channel });
+                        if (this.state.soundOnAdd && this.state.soundOnAdd.timerId === timerId) {
+                            this.state.soundOnAdd = null;
+                        }
+                    }, durationMs);
+                    this.state.soundOnAdd = { pitch: newNote.pitch, timerId };
+                }
+
+            } else if (s.mode === 'select') {
+                s.isMarqueeSelecting = true;
+                s.marquee = { x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y };
+            }
+        }
+
+        _handleNoteDrag(pos) { 
+            this.state.dragOffsets.forEach(offset => { 
+                const newGridPixelX = this._getGridPos(pos).x - offset.pixelOffsetX; 
+                const newGridPixelY = this._getGridPos(pos).y - offset.pixelOffsetY; 
+                const newPos = this._pixelToGrid({ x: newGridPixelX, y: newGridPixelY }); 
+                offset.note.start_tick = newPos.tick; 
+                offset.note.pitch = newPos.pitch; 
+            }); 
+            this.draw(); 
+        }
+        _handleResizeMouseDown(note, pos) { 
+            this._saveStateForUndo(); 
+            const s = this.state; 
+            s.isResizing = true; 
+            if (!s.selectedNotes.includes(note)) s.selectedNotes = [note]; 
+            s.resizeStartTicks = this._pixelToGrid(this._getGridPos(pos)).tick; 
+            s.selectedNotes.forEach(n => { n.originalDuration = n.duration_ticks; }); 
+        }
+        _handleNoteResize(pos) { 
+            const s = this.state; 
+            const currentTick = this._pixelToGrid(this._getGridPos(pos)).tick; 
+            const deltaTicks = currentTick - s.resizeStartTicks; 
+            s.selectedNotes.forEach(n => { 
+                const newDuration = n.originalDuration + deltaTicks; 
+                n.duration_ticks = Math.max(s.ppqn / 16, newDuration); 
+            }); 
+            this.draw(); 
+        }
+        _handleMarqueeSelect(pos) { 
+            this.state.marquee.x2 = pos.x; 
+            this.state.marquee.y2 = pos.y; 
+            this.draw(); 
+        }
+        _handleScrollbarMouseDown(pos) { 
+            const c = this.config, s = this.state, canvas = this.canvas; 
+            const { clientWidth, clientHeight } = canvas; 
+            if (pos.x > clientWidth - c.scrollbarSize && pos.y > c.timelineHeight) { 
+                s.isDraggingVScroll = true; return true; 
+            } 
+            if (pos.y > clientHeight - c.scrollbarSize && pos.x > c.keysWidth) { 
+                s.isDraggingHScroll = true; return true; 
+            } 
+            return false; 
+        }
+        _handleScrollbarMouseMove(pos) { 
+            const c = this.config, s = this.state, canvas = this.canvas; 
+            const { clientWidth, clientHeight } = canvas; 
+            const contentWidth = c.beatWidth * c.totalBeats; 
+            const contentHeight = c.noteHeight * c.totalPitches; 
+            const viewWidth = clientWidth - c.keysWidth - c.scrollbarSize; 
+            const viewHeight = clientHeight - c.timelineHeight - c.scrollbarSize; 
+            if (s.isDraggingVScroll) { 
+                const dy = pos.y - s.lastMousePos.y; 
+                s.scrollY += dy * (contentHeight / (clientHeight - c.timelineHeight)); 
+            } 
+            if (s.isDraggingHScroll) { 
+                const dx = pos.x - s.lastMousePos.x; 
+                s.scrollX += dx * (contentWidth / viewWidth); 
+            } 
+            this._clampScroll(); 
+            this.draw(); 
+        }
+        _handlePan(pos) { 
+            const dx = pos.x - this.state.lastMousePos.x; 
+            const dy = pos.y - this.state.lastMousePos.y; 
+            this.state.scrollX -= dx; 
+            this.state.scrollY -= dy; 
+            this._clampScroll(); 
+            this.draw(); 
+        }
+        _handlePlayheadDrag(pos) { 
+            const gridX = pos.x - this.config.keysWidth + this.state.scrollX; 
+            const tick = (gridX / this.config.beatWidth) * this.state.ppqn; 
+            this.state.playheadTick = Math.max(0, tick); 
+            // If playing, update the lookahead events to avoid re-triggering past notes
+            if (this.state.isPlaying) {
+                this._buildLookaheadEvents();
+            }
+            this.draw(); 
+        }
+
+        // --- UNDO/REDO ---
+        _saveStateForUndo() { 
+            this.state.redoHistory = []; 
+            this.state.undoHistory.push(JSON.parse(JSON.stringify(this.state.notes))); 
+            if (this.state.undoHistory.length > this.MAX_HISTORY) { 
+                this.state.undoHistory.shift(); 
+            } 
+            this._updateUndoRedoButtons(); 
+        }
+        _updateUndoRedoButtons() { 
+            this.dom.undoBtn.disabled = this.state.undoHistory.length === 0; 
+            this.dom.redoBtn.disabled = this.state.redoHistory.length === 0; 
+        }
+
+        // --- UTILITY ---
+        _getMousePos(e, relativeToPage = false) { 
+            const rect = this.canvas.getBoundingClientRect(); 
+            const clientX = e.clientX ?? e.touches?.[0]?.clientX; 
+            const clientY = e.clientY ?? e.touches?.[0]?.clientY; 
+            if (relativeToPage) return { x: clientX, y: clientY }; 
+            return { x: clientX - rect.left, y: clientY - rect.top }; 
+        }
+        _getGridPos(pos) { 
+            return { 
+                x: pos.x - this.config.keysWidth + this.state.scrollX, 
+                y: pos.y - this.config.timelineHeight + this.state.scrollY 
+            }; 
+        }
+        _tickToPixel(tick) { return (tick / this.state.ppqn) * this.config.beatWidth; }
+        _pitchToPixel(pitch) { return (this.config.totalPitches - 1 - pitch) * this.config.noteHeight; }
+        _getNoteRect(note) { 
+            const x = this._tickToPixel(note.start_tick); 
+            const y = this._pitchToPixel(note.pitch); 
+            const w = this._tickToPixel(note.duration_ticks); 
+            const h = this.config.noteHeight; 
+            return { x, y, w, h }; 
+        }
+        _getNoteAt(x, y) { 
+            if (y < this.config.timelineHeight) return null; 
+            const gridPos = this._getGridPos({x, y}); 
+            return this.state.notes.slice().reverse().find(n => { 
+                const r = this._getNoteRect(n); 
+                return gridPos.x >= r.x && gridPos.x <= r.x + r.w && 
+                       gridPos.y >= r.y && gridPos.y <= r.y + r.h; 
+            }); 
+        }
+        _pixelToGrid(pos) { 
+            const s = this.state, c = this.config; 
+            const q = s.ppqn / 4; 
+            const tick = Math.round(pos.x / this._tickToPixel(q)) * q; 
+            const pitch = c.totalPitches - 1 - Math.floor(pos.y / c.noteHeight); 
+            return { 
+                tick: Math.max(0, tick), 
+                pitch: Math.max(0, Math.min(127, pitch)) 
+            }; 
+        }
+        _getCursorStyle(pos) { 
+            const canDragPlayhead = this.state.mode === 'add' || this.state.mode === 'select';
+            if (pos.y < this.config.timelineHeight && pos.x > this.config.keysWidth && canDragPlayhead) { 
+                return 'ew-resize'; 
+            } 
+            if (this.state.mode === 'pan') { 
+                return this.state.isPanning ? 'grabbing' : 'grab'; 
+            } 
+            const c = this.config, canvas = this.canvas; 
+            const isOverScrollbar = pos.x > canvas.clientWidth-c.scrollbarSize || 
+                                  (pos.y > canvas.clientHeight-c.scrollbarSize && 
+                                   pos.x > c.keysWidth);
+            if (isOverScrollbar) return 'default'; 
+            if (pos.x < c.keysWidth) return 'default'; 
+            const note = this._getNoteAt(pos.x, pos.y); 
+            if(note) { 
+                const noteGridPos = this._getGridPos(pos); 
+                const noteRect = this._getNoteRect(note); 
+                if (noteGridPos.x > noteRect.x + noteRect.w - c.resizeHandleWidth) {
+                    return 'ew-resize'; 
+                }
+                return 'move'; 
+            } 
+            return 'cell'; 
+        }
+        _selectNotesInMarquee() { 
+            const s = this.state; 
+            const m = { 
+                x: Math.min(s.marquee.x1, s.marquee.x2), 
+                y: Math.min(s.marquee.y1, s.marquee.y2), 
+                w: Math.abs(s.marquee.x1-s.marquee.x2), 
+                h: Math.abs(s.marquee.y1-s.marquee.y2) 
+            }; 
+            const marqueeGrid = { 
+                x: m.x - this.config.keysWidth + s.scrollX, 
+                y: m.y - this.config.timelineHeight + s.scrollY, 
+                w: m.w, 
+                h: m.h
+            }; 
+            s.selectedNotes = s.notes.filter(note => { 
+                const noteRect = this._getNoteRect(note); 
+                return !(noteRect.x > marqueeGrid.x + marqueeGrid.w || 
+                         noteRect.x + noteRect.w < marqueeGrid.x || 
+                         noteRect.y > marqueeGrid.y + marqueeGrid.h || 
+                         noteRect.y + noteRect.h < marqueeGrid.y); 
+            });
+        }
+        _clampScroll() { 
+            const s = this.state, c = this.config, canvas = this.canvas; 
+            const maxScrollX = Math.max(0, (c.beatWidth * c.totalBeats) - 
+                               (canvas.clientWidth - c.keysWidth - c.scrollbarSize)); 
+            const maxScrollY = Math.max(0, (c.noteHeight * c.totalPitches) - 
+                               (canvas.clientHeight - c.timelineHeight - c.scrollbarSize)); 
+            s.scrollX = Math.max(0, Math.min(s.scrollX, maxScrollX)); 
+            s.scrollY = Math.max(0, Math.min(s.scrollY, maxScrollY)); 
+        }
+        _hideContextMenu() { this.dom.contextMenu.style.display = 'none'; }
+        _messagesToNotes(messages) { 
+            const notes = []; 
+            const openNotes = {}; 
+            messages.sort((a, b) => a.time - b.time); 
+            messages.forEach(msg => { 
+                if (msg.type === 'noteOn' && msg.velocity > 0) { 
+                    openNotes[`${msg.pitch}_${msg.channel}`] = msg; 
+                } else if (msg.type === 'noteOff' || (msg.type === 'noteOn' && msg.velocity === 0)) { 
+                    const key = `${msg.pitch}_${msg.channel}`; 
+                    if (openNotes[key]) { 
+                        const nOn = openNotes[key]; 
+                        notes.push({ 
+                            pitch: nOn.pitch, velocity: nOn.velocity, channel: nOn.channel, 
+                            start_tick: nOn.time, duration_ticks: msg.time - nOn.time 
+                        }); 
+                        delete openNotes[key]; 
+                    } 
+                } 
+            }); 
+            return notes; 
+        }
+        _notesToMessages(notes) { 
+            const messages = []; 
+            notes.forEach(n => { 
+                messages.push({ 
+                    type: 'noteOn', pitch: n.pitch, velocity: n.velocity, 
+                    time: n.start_tick, channel: n.channel || 0, 
+                }); 
+                messages.push({ 
+                    type: 'noteOff', pitch: n.pitch, velocity: 0, 
+                    time: n.start_tick + n.duration_ticks, channel: n.channel || 0, 
+                }); 
+            }); 
+            messages.sort((a, b) => { 
+                if (a.time < b.time) return -1; 
+                if (a.time > b.time) return 1; 
+                if (a.type === 'noteOff' && b.type === 'noteOn') return -1; 
+                if (a.type === 'noteOn' && b.type === 'noteOff') return 1; 
+                return 0; 
+            }); 
+            return messages; 
+        }
+    }
+

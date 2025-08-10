@@ -37,29 +37,35 @@
             flex-direction: column;
         }
 
+        .top-row, .bottom-row {
+            position: relative;
+            overflow: hidden; /* Hide overflow to prevent scrollbars */
+        }
+        
         .top-row {
             flex-basis: 50%;
             background-color: #e9e9e9;
-            overflow: auto;
         }
 
         .dragger {
             height: 10px;
             background-color: #ccc;
             cursor: ns-resize;
+            flex-shrink: 0; /* Prevent dragger from shrinking */
         }
 
         .bottom-row {
             flex-grow: 1;
             background-color: #d9d9d9;
-            overflow: auto;
-            display: flex;
         }
 
-        #keyboardCanvas {
+        #keyboardCanvas, #pianoRollCanvas {
+            position: absolute;
             width: 100%;
             height: 100%;
-            touch-action: none; /* Prevent default touch actions like scrolling */
+            top: 0;
+            left: 0;
+            touch-action: none; /* Prevent default touch actions */
         }
     </style>
 </head>
@@ -70,20 +76,21 @@
             <h3>Musical Playground</h3>
         </div>
         <div class="content-wrapper">
-            <div class="top-row" id="topRow"></div>
+            <div class="top-row" id="topRow">
+                <canvas id="pianoRollCanvas"></canvas>
+            </div>
             <div class="dragger" id="dragger"></div>
             <div class="bottom-row" id="bottomRow">
                 <canvas id="keyboardCanvas"></canvas>
             </div>
         </div>
     </div>
-
+    
+    <script src="https://cdn.jsdelivr.net/npm/webaudio-tinysynth/webaudio-tinysynth.js"></script>
     <script src="Drawer.js"></script>
     <script src="PianoKeyboard.js"></script>
+    <script src="PianoRoll.js"></script>
     <script src="app.js"></script>
-    <script>
-    
-    </script>
 
 </body>
 </html>
