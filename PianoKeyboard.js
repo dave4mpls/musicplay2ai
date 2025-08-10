@@ -1,81 +1,111 @@
-import { SliderControl } from './SliderControl.js';
-import { TabControl } from './TabControl.js';
-
 /**
  * PianoKeyboard Component
- * A piano keyboard rendered on an HTML canvas with MIDI support.
- * Supports touch and mouse interactions, MIDI input/output, and customizable settings.
- * @param {Object} config - Configuration object for the piano keyboard.
- * @param {HTMLCanvasElement} config.canvas - The canvas element to render the keyboard on.
- * @param {Function} config.midiCallback - Callback function to send MIDI messages.
- * @param {Array} [config.customKeyMappings] - Custom key mappings for computer keyboard keys to MIDI notes.
- * @param {Function} [config.onSettingsChange] - Callback function to handle settings changes.
- * 
- * Expectations: 
- * - The canvas should fill the available space in the container.
- * - All controls and keys in the control should be drawn directly on the canvas by this code or sub-components, not by using HTML elements.
- * - The keyboard should support touch and mouse interactions.  
- * - The keyboard should handle MIDI input and output.
- * - The keyboard should allow customization of key mappings and settings.  
- * - The keyboard should persist settings across page reloads using localStorage.
- * - The keyboard should have a responsive design that adapts to different screen sizes.
- * - The keyboard should have a drawer for settings controls that can be opened and closed.
- * - The keyboard should have a scrollbar for navigating keys when the canvas width is smaller than the total key width.
- * - The drawer should pan when touched or dragged, allowing users to scroll through settings controls both horizontally and vertically.
- * - The drawer should have a handle that indicates it can be opened or closed.
- * - When you pull down the drawer, the drawer handle should move down and still be over the top of the keys.  
- * - The tab bar should render at the top of the drawer, but it is scrollable like the rest of the drawer components.
- * - When you add a tab to the tab control, it should be clickable and only the controls for that tab should be visible.
+ * * This class renders an interactive piano keyboard on a canvas element. It handles
+ * user input from mouse, touch, and computer keyboard, and outputs MIDI messages.
+ * It now integrates with the external Drawer.js component to provide a settings UI.
  */
 class PianoKeyboard {
+    /**
+     * @param {object} config - The configuration object for the piano keyboard.
+     * @param {HTMLCanvasElement} config.canvas - The canvas element to render on.
+     * @param {function} config.midiCallback - Callback function to send MIDI messages.
+     * @param {function} [config.onSettingsChange] - Callback for when settings are saved.
+     * @param {Array} [config.customKeyMappings] - Custom computer keyboard to MIDI note mappings.
+     */
     constructor(config) {
         this.canvas = config.canvas;
         this.ctx = this.canvas.getContext('2d');
         this.midiCallback = config.midiCallback;
-        this.customKeyMappings = config.customKeyMappings || [];
         this.onSettingsChange = config.onSettingsChange || (() => {});
+        this.customKeyMappings = config.customKeyMappings || [];
         this.canvasId = this.canvas.id || 'piano-keyboard-default';
+        this.resizeTimer = null;
 
-        // --- State Variables ---
+        // --- State ---
         this.keys = [];
         this.activeTouches = new Map();
         this.computerKeysDown = new Set();
         this.scrollOffset = 0;
         this.octaveOffset = 0;
-        this.calculatedKeyHeight = 0; 
+        this.keyHeight = 0;
         
-        // Drawer State
-        this.isDrawerOpen = false;
-        this.drawerScrollOffsetY = 0;
-        this.calculatedDrawerContentHeight = 0;
+        // --- Settings ---
+        this.settings = {
+            volume: 100,
+            minVelocity: 0,
+            maxVelocity: 127,
+            pitchBend: false,
+            velocityByPos: false
+        };
         
-        // --- Settings & Controls ---
-        this.settings = { volume: 100, minVelocity: 0, maxVelocity: 127 };
-        this.volumeSlider = new SliderControl({ ctx: this.ctx, label: 'Volume', initialValue: this.settings.volume, width: 100 });
-        this.tabControl = new TabControl({ctx: this.ctx, tabs: [{ label: 'Volume', id: 'volume' }, { label: 'Keypress', id: 'Keypress'}], x: 20, y: 20 });
-
-        this.minVelocitySlider = new SliderControl({ ctx: this.ctx, label: 'Min', initialValue: this.settings.minVelocity, width: 100 });
-        this.maxVelocitySlider = new SliderControl({ ctx: this.ctx, label: 'Max', initialValue: this.settings.maxVelocity, width: 100 });
-        this.controls = [this.volumeSlider, this.minVelocitySlider, this.maxVelocitySlider];
-
         // --- Constants ---
         this.TOTAL_KEYS = 88;
         this.WHITE_KEYS_COUNT = 52;
-        this.LOWEST_NOTE = 21;
+        this.LOWEST_NOTE = 21; // MIDI note A0
         this.SCROLLBAR_HEIGHT = 20;
         this.WHITE_KEY_ASPECT_RATIO = 5.5; 
         this.BLACK_KEY_WIDTH_RATIO = 0.6;
         this.BLACK_KEY_HEIGHT_RATIO = 0.6;
         this.MAX_WHITE_KEY_WIDTH = 40;
-        this.DRAWER_OPEN_HEIGHT_RATIO = 0.35;
-        this.DRAWER_HANDLE_HEIGHT = 20;
+
+        // --- Component Initialization ---
+        // The EventBroker manages interactions between controls.
+        this.eventBroker = new EventBroker(this.drawer);
+
+        // Initialize the drawer with tabs and controls using the new format from Drawer.js.
+        this.drawer = new Drawer({
+            ctx: this.ctx,
+            tabs: this.initTabs(),
+            onStateChange: this.onStateChangeHandler.bind(this),
+            eventBroker: this.eventBroker,
+            handleHeight: 20,
+            tabHeight: 30,
+        });
+        // Assign the created drawer to the broker.
+        this.eventBroker.drawer = this.drawer;
 
         this.initKeys();
         this.initEventListeners();
-        this.loadSettings(); // Load settings after init
+        this.loadSettings();
         this.resizeCanvas();
+        this.animationLoop();
     }
 
+    /**
+     * Initializes the tab structure for the settings drawer.
+     * @returns {object} The configuration for tabs and their controls.
+     */
+    initTabs() {
+        const onStateChange = (control) => this.onStateChangeHandler(control);
+
+        return {
+            'Volume': [
+                new SliderControl({ ctx: this.ctx, id: 'volume', label: 'Volume', min: 0, max: 127, initialValue: this.settings.volume, onStateChange }),
+                new SliderControl({ ctx: this.ctx, id: 'minVelocity', label: 'Min Velocity', min: 0, max: 127, initialValue: this.settings.minVelocity, onStateChange }),
+                new SliderControl({ ctx: this.ctx, id: 'maxVelocity', label: 'Max Velocity', min: 0, max: 127, initialValue: this.settings.maxVelocity, onStateChange }),
+            ],
+            'Keys': [
+                new ToggleSwitch({ ctx: this.ctx, id: 'pitchBend', label: 'Drag for Pitch Bend', initialValue: this.settings.pitchBend, onStateChange }),
+                new ToggleSwitch({ ctx: this.ctx, id: 'velocityByPos', label: 'Lower on Keys Is Louder', initialValue: this.settings.velocityByPos, onStateChange }),
+            ],
+            'Scales': [] // Placeholder for future scale features
+        };
+    }
+
+    /**
+     * Handles state changes from any control in the drawer.
+     * @param {object} control - The control that changed.
+     */
+    onStateChangeHandler(control) {
+        if (control && control.id && this.settings.hasOwnProperty(control.id)) {
+            this.settings[control.id] = control.value;
+            this.saveSettings();
+        }
+    }
+
+    /**
+     * Creates the internal representation of all 88 piano keys.
+     */
     initKeys() {
         let whiteKeyIndex = 0;
         for (let i = 0; i < this.TOTAL_KEYS; i++) {
@@ -85,175 +115,180 @@ class PianoKeyboard {
         }
     }
 
+    /**
+     * Sets up all necessary event listeners for the component.
+     */
     initEventListeners() {
         new ResizeObserver(() => this.resizeCanvas()).observe(this.canvas);
-        this.canvas.addEventListener('mousedown', this.handlePointerDown.bind(this));
-        window.addEventListener('mousemove', this.handlePointerMove.bind(this));
-        window.addEventListener('mouseup', this.handlePointerUp.bind(this));
-        this.canvas.addEventListener('touchstart', this.handlePointerDown.bind(this), { passive: false });
-        window.addEventListener('touchmove', this.handlePointerMove.bind(this), { passive: false });
-        window.addEventListener('touchend', this.handlePointerUp.bind(this));
-        window.addEventListener('touchcancel', this.handlePointerUp.bind(this));
+
+        const getCanvasCoordinates = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        };
+
+        this.canvas.addEventListener('pointerdown', (e) => {
+            e.preventDefault();
+            const event = { type: 'pointerdown', ...getCanvasCoordinates(e), id: e.pointerId ?? 'mouse' };
+
+            if (this.eventBroker.capturedControl || this.drawer.isPointInBounds(event.x, event.y)) {
+                this.drawer.handleEvent(event);
+            } else {
+                this.handleKeyboardPointerDown(event);
+            }
+        });
+
+        window.addEventListener('pointermove', (e) => {
+            const event = { type: 'pointermove', ...getCanvasCoordinates(e), id: e.pointerId ?? 'mouse' };
+
+            if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
+                e.preventDefault();
+                this.drawer.handleEvent(event);
+            } else if (this.activeTouches.size > 0) {
+                this.handleKeyboardPointerMove(event);
+            } else if (this.drawer.isPointInBounds(event.x, event.y)) {
+                this.drawer.handleEvent(event);
+            }
+        });
+
+        window.addEventListener('pointerup', (e) => {
+            const event = { type: 'pointerup', ...getCanvasCoordinates(e), id: e.pointerId ?? 'mouse' };
+            
+            if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
+                e.preventDefault();
+                this.drawer.handleEvent(event);
+            }
+            this.handleKeyboardPointerUp(event);
+        });
+        
+        this.canvas.addEventListener('wheel', (e) => {
+            const event = { type: 'wheel', deltaY: e.deltaY, ...getCanvasCoordinates(e) };
+            if (this.eventBroker.capturedControl || this.drawer.isPointInBounds(event.x, event.y)) {
+                e.preventDefault();
+                this.drawer.handleEvent(event);
+            }
+        }, { passive: false });
+
         window.addEventListener('keydown', this.handleKeyDown.bind(this));
         window.addEventListener('keyup', this.handleKeyUp.bind(this));
     }
 
+    /**
+     * Resizes the canvas and recalculates layout-dependent properties.
+     */
     resizeCanvas() {
-        if (this.canvas.width !== this.canvas.clientWidth || this.canvas.height !== this.canvas.clientHeight) {
-            this.canvas.width = this.canvas.clientWidth;
-            this.canvas.height = this.canvas.clientHeight;
-            this.draw();
-        }
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+        this.resizeTimer = setTimeout(() => {
+            this.performResize();
+            this.resizeTimer = null;
+        }, 25);
     }
 
-    handlePointerDown(e) {
-        e.preventDefault();
-        const pointers = e.changedTouches ? e.changedTouches : [e];
-        const rect = this.canvas.getBoundingClientRect();
-
-        for (const pointer of pointers) {
-            const x = pointer.clientX - rect.left;
-            const y = pointer.clientY - rect.top;
-            const id = pointer.identifier ?? 'mouse';
-            
-            if (this.isPointInRect(x, y, this.getDrawerHandleBounds())) {
-                this.isDrawerOpen = !this.isDrawerOpen;
-                this.draw();
-                return;
-            }
-
-            if (this.isDrawerOpen) {
-                const drawerContentY = 0; // Content area now starts at the top
-
-                // Check for interactions within the drawer's content area (tabs, controls, panning)
-                if (y > drawerContentY && y < this.calculatedDrawerContentHeight) {
-                    const relativeX = x;
-                    const relativeY = y - drawerContentY + this.drawerScrollOffsetY;
-
-                    // Check if a tab is clicked
-                    const tab = this.tabControl.getTabAt(relativeX, relativeY);
-                    if (tab) {
-                        this.tabControl.setActiveTab(tab.id);
-                        this.draw();
-                        return;
-                    }
-
-                    // Check if a control (slider) is clicked
-                    let controlInteracted = false;
-                    for (const control of this.controls) {
-                        if (control.isPointOnControl(relativeX, relativeY)) {
-                            this.activeTouches.set(id, { type: 'control', control: control });
-                            control.updateValueFromPosition(relativeX);
-                            this.updateSettingsFromControls();
-                            controlInteracted = true;
-                            break;
-                        }
-                    }
-                    if (controlInteracted) { this.draw(); continue; }
-
-                    // If nothing else was hit, it's a pan
-                    this.activeTouches.set(id, { type: 'drawerPan', lastY: y });
-                    this.draw();
-                    continue;
-                }
-            }
-
-            if (this.isPointInRect(x, y, this.getScrollbarHandleBounds())) {
-                this.activeTouches.set(id, { type: 'scrollbar', startX: x - this.getScrollbarHandleBounds().x });
-                this.draw();
-                continue; 
-            }
-
-            const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
-            const panAreaTop = totalDrawerHeight + this.calculatedKeyHeight;
-            const panAreaBottom = this.canvas.height - this.SCROLLBAR_HEIGHT;
-            if (y > panAreaTop && y < panAreaBottom) {
-                this.activeTouches.set(id, { type: 'pan', lastX: x });
-                this.draw();
-                continue;
-            }
-
-            const key = this.getKeyAt(x, y);
-            if (key) {
-                this.pressKey(key.note);
-                this.activeTouches.set(id, { type: 'key', note: key.note });
-            }
-        }
+    performResize() {
+        this.canvas.width = this.canvas.clientWidth;
+        this.canvas.height = this.canvas.clientHeight;
+        this.drawer.updateHeight();
         this.draw();
     }
 
-    handlePointerMove(e) {
-        if (this.activeTouches.size === 0) return;
-        e.preventDefault();
-        const pointers = e.changedTouches ? e.changedTouches : [e];
-        const rect = this.canvas.getBoundingClientRect();
 
-        for (const pointer of pointers) {
-            const x = pointer.clientX - rect.left;
-            const y = pointer.clientY - rect.top;
-            const id = pointer.identifier ?? 'mouse';
-            const activeTouch = this.activeTouches.get(id);
+    /**
+     * Handles pointer down events specifically for the keyboard area (not the drawer).
+     * @param {object} event - The normalized pointer event.
+     */
+    handleKeyboardPointerDown(event) {
+        const { x, y, id } = event;
 
-            if (!activeTouch) continue;
+        if (this.isPointInRect(x, y, this.getScrollbarHandleBounds())) {
+            this.activeTouches.set(id, { type: 'scrollbar', startX: x - this.getScrollbarHandleBounds().x });
+            return;
+        }
 
-            switch(activeTouch.type) {
-                case 'control':
-                    activeTouch.control.updateValueFromPosition(x);
-                    this.updateSettingsFromControls();
-                    break;
-                case 'drawerPan':
-                    const dy = y - activeTouch.lastY;
-                    this.drawerScrollOffsetY -= dy;
-                    this.clampDrawerScroll();
-                    activeTouch.lastY = y;
-                    break;
-                case 'scrollbar':
-                    const { totalWidth, handleWidth, trackWidth } = this.getScrollbarMetrics();
-                    if (totalWidth <= this.canvas.width) return;
-                    const newHandleX = x - activeTouch.startX;
-                    const travelDist = trackWidth - handleWidth;
-                    const scrollRatio = Math.max(0, Math.min(1, newHandleX / travelDist));
-                    this.scrollOffset = scrollRatio * (totalWidth - this.canvas.width);
-                    this.clampScrollOffset();
-                    break;
-                case 'pan':
-                    const dx = x - activeTouch.lastX;
-                    this.scrollOffset -= dx;
-                    this.clampScrollOffset();
-                    activeTouch.lastX = x;
-                    break;
-                case 'key':
+        const drawerHeight = this.drawer.getHeight();
+        const panAreaTop = drawerHeight + this.keyHeight;
+        const panAreaBottom = this.canvas.height - this.SCROLLBAR_HEIGHT;
+        if (y > panAreaTop && y < panAreaBottom) {
+            this.activeTouches.set(id, { type: 'pan', lastX: x });
+            return;
+        }
+
+        const key = this.getKeyAt(x, y);
+        if (key) {
+            const relativeY = y - drawerHeight;
+            this.pressKey(key.note, relativeY);
+            this.activeTouches.set(id, { type: 'key', note: key.note, startX: x, startY: y, keyWidth: key.width });
+        }
+    }
+
+    /**
+     * Handles pointer move events for active keyboard interactions.
+     * @param {object} event - The normalized pointer event.
+     */
+    handleKeyboardPointerMove(event) {
+        const { x, y, id } = event;
+        const activeTouch = this.activeTouches.get(id);
+        if (!activeTouch) return;
+
+        switch (activeTouch.type) {
+            case 'scrollbar': {
+                const { totalWidth, handleWidth, trackWidth } = this.getScrollbarMetrics();
+                if (totalWidth <= this.canvas.width) return;
+                const newHandleX = x - activeTouch.startX;
+                const travelDist = trackWidth - handleWidth;
+                const scrollRatio = Math.max(0, Math.min(1, newHandleX / travelDist));
+                this.scrollOffset = scrollRatio * (totalWidth - this.canvas.width);
+                this.clampScrollOffset();
+                break;
+            }
+            case 'pan': {
+                const panDx = x - activeTouch.lastX;
+                this.scrollOffset -= panDx;
+                this.clampScrollOffset();
+                activeTouch.lastX = x;
+                break;
+            }
+            case 'key': {
+                if (this.settings.pitchBend) {
+                    const bendDX = x - activeTouch.startX;
+                    const bendRatio = Math.max(-1, Math.min(1, bendDX / (activeTouch.keyWidth * 2))); // Wider bend range
+                    const bendValue = Math.round(8192 + bendRatio * 8191);
+                    this.midiCallback([0xE0, bendValue & 0x7F, (bendValue >> 7) & 0x7F], 'internal');
+                } else {
                     const currentKey = this.getKeyAt(x, y);
-                    const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
                     if (currentKey && currentKey.note !== activeTouch.note) {
                         this.releaseKey(activeTouch.note);
-                        this.pressKey(currentKey.note);
-                        this.activeTouches.set(id, { type: 'key', note: currentKey.note });
-                    } else if (!currentKey && y > totalDrawerHeight) {
+                        const relativeY = y - this.drawer.getHeight();
+                        this.pressKey(currentKey.note, relativeY);
+                        this.activeTouches.set(id, { type: 'key', note: currentKey.note, startX: x, startY: y, keyWidth: currentKey.width });
+                    } else if (!currentKey && y > this.drawer.getHeight()) {
                         this.releaseKey(activeTouch.note);
                         this.activeTouches.delete(id);
                     }
-                    break;
+                }
+                break;
             }
         }
-        this.draw();
     }
 
-    handlePointerUp(e) {
-        e.preventDefault();
-        const pointers = e.changedTouches ? e.changedTouches : [e];
-        for (const pointer of pointers) {
-            const id = pointer.identifier ?? 'mouse';
-            const activeTouch = this.activeTouches.get(id);
-            if (activeTouch) {
-                if (activeTouch.type === 'key') this.releaseKey(activeTouch.note);
-                if (activeTouch.type === 'control') this.saveSettings();
-                this.activeTouches.delete(id);
+    /**
+     * Handles pointer up events to release keys and end interactions.
+     * @param {object} event - The normalized pointer event.
+     */
+    handleKeyboardPointerUp(event) {
+        const { id } = event;
+        const activeTouch = this.activeTouches.get(id);
+        if (activeTouch) {
+            if (activeTouch.type === 'key') {
+                this.releaseKey(activeTouch.note);
+                if (this.settings.pitchBend) this.midiCallback([0xE0, 0, 64], 'internal'); // Reset pitch bend
             }
+            this.activeTouches.delete(id);
         }
-        this.draw();
     }
     
+    /**
+     * Handles computer keyboard keydown events for playing notes.
+     * @param {KeyboardEvent} e - The keyboard event.
+     */
     handleKeyDown(e) {
         if (e.repeat || this.computerKeysDown.has(e.code)) return;
         const keyMapping = this.getComputerKeyMapping();
@@ -261,14 +296,14 @@ class PianoKeyboard {
         if (noteInfo) {
             this.computerKeysDown.add(e.code);
             this.pressKey(noteInfo.note + (this.octaveOffset * 12));
-        } else if (e.code === 'Comma') {
-            this.octaveOffset = Math.max(-4, this.octaveOffset - 1);
-        } else if (e.code === 'Period') {
-            this.octaveOffset = Math.min(4, this.octaveOffset + 1);
-        }
-        this.draw();
+        } else if (e.code === 'Comma' || e.code === 'KeyZ') this.octaveOffset = Math.max(-4, this.octaveOffset - 1);
+        else if (e.code === 'Period' || e.code === 'KeyX') this.octaveOffset = Math.min(4, this.octaveOffset + 1);
     }
 
+    /**
+     * Handles computer keyboard keyup events.
+     * @param {KeyboardEvent} e - The keyboard event.
+     */
     handleKeyUp(e) {
         const keyMapping = this.getComputerKeyMapping();
         const noteInfo = keyMapping[e.code];
@@ -276,112 +311,175 @@ class PianoKeyboard {
             this.computerKeysDown.delete(e.code);
             this.releaseKey(noteInfo.note + (this.octaveOffset * 12));
         }
-        this.draw();
     }
     
+    /**
+     * Gets the mapping of computer keys to MIDI notes.
+     * @returns {object} The key mapping.
+     */
     getComputerKeyMapping() {
-        const baseNote = 60;
-        const mapping = {'KeyQ':{note:baseNote+0},'KeyW':{note:baseNote+2},'KeyE':{note:baseNote+4},'KeyR':{note:baseNote+5},'KeyT':{note:baseNote+7},'KeyY':{note:baseNote+9},'KeyU':{note:baseNote+11},'KeyI':{note:baseNote+12},'KeyO':{note:baseNote+14},'KeyP':{note:baseNote+16},'Digit2':{note:baseNote+1},'Digit3':{note:baseNote+3},'Digit5':{note:baseNote+6},'Digit6':{note:baseNote+8},'Digit7':{note:baseNote+10},'Digit9':{note:baseNote+13},'Digit0':{note:baseNote+15}};
+        const baseNote = 60; // Middle C
+        const mapping = {
+            'KeyA':{note:baseNote+0}, 'KeyW':{note:baseNote+1}, 'KeyS':{note:baseNote+2}, 'KeyE':{note:baseNote+3},
+            'KeyD':{note:baseNote+4}, 'KeyF':{note:baseNote+5}, 'KeyT':{note:baseNote+6}, 'KeyG':{note:baseNote+7},
+            'KeyY':{note:baseNote+8}, 'KeyH':{note:baseNote+9}, 'KeyU':{note:baseNote+10}, 'KeyJ':{note:baseNote+11},
+            'KeyK':{note:baseNote+12},'KeyO':{note:baseNote+13},'KeyL':{note:baseNote+14},'KeyP':{note:baseNote+15},
+            'Semicolon':{note:baseNote+16}
+        };
         this.customKeyMappings.forEach(m => { mapping[m.code] = { note: m.note }; });
         return mapping;
     }
 
-    pressKey(note) {
+    /**
+     * Triggers a 'note on' event for a specific key.
+     * @param {number} note - The MIDI note number.
+     * @param {number|null} [relativeY=null] - The vertical position on the key for velocity calculation.
+     */
+    pressKey(note, relativeY = null) {
         const key = this.keys.find(k => k.note === note);
-        if (key) {
-            key.isPressed = true;
-            const velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, this.settings.volume));
-            this.midiCallback([0x90, note, velocity], "internal");
+        if (!key || key.isPressed) return;
+
+        key.isPressed = true;
+        let velocity = this.settings.volume;
+
+        if (this.settings.velocityByPos && relativeY !== null) {
+            let ratio = 0;
+            if (key.isBlack) {
+                ratio = Math.max(0, Math.min(1, relativeY / key.height));
+            } else {
+                const whiteKeyVelocityTopY = key.height * this.BLACK_KEY_HEIGHT_RATIO;
+                ratio = relativeY > whiteKeyVelocityTopY 
+                    ? Math.max(0, Math.min(1, (relativeY - whiteKeyVelocityTopY) / (key.height - whiteKeyVelocityTopY)))
+                    : 0;
+            }
+            velocity = Math.round(ratio * 127);
         }
+        
+        velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, velocity));
+        
+        this.midiCallback([0x90, note, velocity], "internal");
     }
 
+    /**
+     * Triggers a 'note off' event for a specific key.
+     * @param {number} note - The MIDI note number.
+     */
     releaseKey(note) {
         const key = this.keys.find(k => k.note === note);
-        if (key) {
+        if (key && key.isPressed) {
             key.isPressed = false;
             this.midiCallback([0x80, note, 0], "internal");
         }
     }
 
+    /**
+     * Handles incoming MIDI messages from external devices.
+     * @param {Uint8Array} message - The MIDI message data.
+     * @param {string} deviceName - The name of the source device.
+     */
     handleExternalMidiMessage(message, deviceName) {
-        const status = message[0], command = status & 0xF0, originalChannel = status & 0x0F;
-        const newMessage = [...message];
-
+        const command = message[0] & 0xF0;
         if (command === 0x90 || command === 0x80) {
             const note = message[1];
-            let velocity = (message.length > 2) ? message[2] : 0;
+            const velocity = (message.length > 2) ? message[2] : 0;
             const key = this.keys.find(k => k.note === note);
-            
-            if (command === 0x90 && velocity > 0) {
-                if (key) key.isPressed = true;
-                velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, velocity));
-                newMessage[2] = velocity;
-            } else {
-                if (key) key.isPressed = false;
+            if (key) {
+                key.isPressed = (command === 0x90 && velocity > 0);
             }
-            this.draw();
         }
-        
-        const newChannel = (originalChannel === 9) ? 9 : 0;
-        newMessage[0] = command | newChannel;
-        this.midiCallback(newMessage, deviceName);
+        this.midiCallback([...message], deviceName);
     }
 
+    /**
+     * Finds the key at a given canvas coordinate.
+     * @param {number} x - The x-coordinate.
+     * @param {number} y - The y-coordinate.
+     * @returns {object|null} The key object or null if none found.
+     */
     getKeyAt(x, y) {
-        const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
-        if (y < totalDrawerHeight || y > totalDrawerHeight + this.calculatedKeyHeight) return null;
-        const adjustedY = y - totalDrawerHeight;
+        const drawerHeight = this.drawer.getHeight();
+        if (y < drawerHeight || y > drawerHeight + this.keyHeight) return null;
+        
+        const adjustedX = x + this.scrollOffset;
+        const adjustedY = y - drawerHeight;
+
         for (const key of this.keys.filter(k => k.isBlack).reverse()) {
-            if (x >= key.x && x <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
+            if (adjustedX >= key.x && adjustedX <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
         }
         for (const key of this.keys.filter(k => !k.isBlack).reverse()) {
-            if (x >= key.x && x <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
+            if (adjustedX >= key.x && adjustedX <= key.x + key.width && adjustedY >= key.y && adjustedY <= key.y + key.height) return key;
         }
         return null;
     }
 
+    /**
+     * The main animation loop for continuous rendering.
+     */
+    animationLoop() {
+        this.draw();
+        requestAnimationFrame(this.animationLoop.bind(this));
+    }
+
+    /**
+     * The main drawing function, called on every frame.
+     */
     draw() {
         this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        this.calculateDimensions();
-        this.clampScrollOffset();
-        this.drawDrawer();
-        const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
-        const keyBottomY = totalDrawerHeight + this.calculatedKeyHeight;
+        
+        const drawerHeight = this.drawer.getHeight();
+        this.calculateKeyDimensions(drawerHeight);
+        
+        const keyBottomY = drawerHeight + this.keyHeight;
         const scrollbarTopY = this.canvas.height - this.SCROLLBAR_HEIGHT;
         if (keyBottomY < scrollbarTopY) {
             this.ctx.fillStyle = '#f0f0f0';
             this.ctx.fillRect(0, keyBottomY, this.canvas.width, scrollbarTopY - keyBottomY);
         }
-        if (this.calculatedKeyHeight > 0) {
+
+        if (this.keyHeight > 0) {
             this.ctx.save();
-            this.ctx.translate(0, totalDrawerHeight);
+            this.ctx.translate(0, drawerHeight);
+            this.ctx.beginPath();
+            this.ctx.rect(0, 0, this.canvas.width, this.keyHeight);
+            this.ctx.clip();
+            this.ctx.translate(-this.scrollOffset, 0);
             this.keys.filter(k => !k.isBlack).forEach(key => this.drawWhiteKey(key));
             this.keys.filter(k => k.isBlack).forEach(key => this.drawBlackKey(key));
             this.ctx.restore();
         }
+        
         this.drawScrollbar();
-    }
+        this.drawer.draw();
 
-    calculateDimensions() {
-        this.calculatedDrawerContentHeight = this.isDrawerOpen ? (this.canvas.height * this.DRAWER_OPEN_HEIGHT_RATIO) - this.DRAWER_HANDLE_HEIGHT : 0;
-        if (this.calculatedDrawerContentHeight < 0) this.calculatedDrawerContentHeight = 0;
-        const totalDrawerHeight = this.DRAWER_HANDLE_HEIGHT + this.calculatedDrawerContentHeight;
-        const availableHeight = this.canvas.height - this.SCROLLBAR_HEIGHT - totalDrawerHeight;
+        const overlayControl = this.eventBroker.getOverlayControl();
+        if (overlayControl) {
+            this.drawer.drawOverlay(overlayControl);
+        }
+    }
+    
+    /**
+     * Calculates the dimensions and positions of all keys based on canvas size.
+     * @param {number} drawerHeight - The current height of the settings drawer.
+     */
+    calculateKeyDimensions(drawerHeight) {
+        const availableHeight = this.canvas.height - this.SCROLLBAR_HEIGHT - drawerHeight;
         if (availableHeight <= 0) {
-            this.calculatedKeyHeight = 0;
-            this.keys.forEach(k => { k.width = k.height = 0; });
+            this.keyHeight = 0;
             return;
         }
+
         const widthFromHeight = availableHeight / this.WHITE_KEY_ASPECT_RATIO;
         const whiteKeyWidth = Math.min(widthFromHeight, this.MAX_WHITE_KEY_WIDTH);
-        this.calculatedKeyHeight = whiteKeyWidth * this.WHITE_KEY_ASPECT_RATIO;
+        
+        this.keyHeight = whiteKeyWidth * this.WHITE_KEY_ASPECT_RATIO;
         const blackKeyWidth = whiteKeyWidth * this.BLACK_KEY_WIDTH_RATIO;
-        const blackKeyHeight = this.calculatedKeyHeight * this.BLACK_KEY_HEIGHT_RATIO;
+        const blackKeyHeight = this.keyHeight * this.BLACK_KEY_HEIGHT_RATIO;
+
         this.keys.forEach(key => {
             if (!key.isBlack) {
                 key.width = whiteKeyWidth;
-                key.height = this.calculatedKeyHeight;
-                key.x = key.whiteKeyIndex * whiteKeyWidth - this.scrollOffset;
+                key.height = this.keyHeight;
+                key.x = key.whiteKeyIndex * whiteKeyWidth;
                 key.y = 0;
             }
         });
@@ -396,14 +494,20 @@ class PianoKeyboard {
         });
     }
 
+    /**
+     * Ensures the scroll offset does not go out of bounds.
+     */
     clampScrollOffset() {
         const { totalWidth } = this.getScrollbarMetrics();
         const maxScroll = totalWidth - this.canvas.width;
         this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScroll > 0 ? maxScroll : 0));
     }
 
+    /**
+     * Draws a single white key.
+     * @param {object} key - The key object to draw.
+     */
     drawWhiteKey(key) {
-        if (key.x > this.canvas.width || key.x + key.width < 0) return;
         this.ctx.save();
         const cornerRadius = Math.min(6, key.width / 4, key.height / 8);
         this.ctx.beginPath();
@@ -419,8 +523,11 @@ class PianoKeyboard {
         this.ctx.restore();
     }
 
+    /**
+     * Draws a single black key.
+     * @param {object} key - The key object to draw.
+     */
     drawBlackKey(key) {
-        if (key.x > this.canvas.width || key.x + key.width < 0) return;
         this.ctx.save();
         const cornerRadius = Math.min(5, key.width / 4, key.height / 8);
         this.ctx.beginPath();
@@ -434,89 +541,47 @@ class PianoKeyboard {
         this.ctx.fillRect(key.x + 2, key.y + 2, key.width - 4, 2);
         this.ctx.restore();
     }
-
-    drawDrawer() {
-        this.drawDrawerHandle();
-        if (!this.isDrawerOpen) return;
-        this.ctx.save();
-        const drawerContentY = this.DRAWER_HANDLE_HEIGHT;
-        this.ctx.fillStyle = '#ffffff';
-        this.ctx.fillRect(0, drawerContentY, this.canvas.width, this.calculatedDrawerContentHeight);
-        this.ctx.strokeStyle = '#b0b0b0';
-        this.ctx.beginPath();
-        this.ctx.moveTo(0, drawerContentY + this.calculatedDrawerContentHeight);
-        this.ctx.lineTo(this.canvas.width, drawerContentY + this.calculatedDrawerContentHeight);
-        this.ctx.stroke();
-        
-        // Clip the drawing area for the drawer content
-        this.ctx.beginPath();
-        this.ctx.rect(0, drawerContentY, this.canvas.width, this.calculatedDrawerContentHeight);
-        this.ctx.clip();
-
-        this.ctx.translate(0, drawerContentY - this.drawerScrollOffsetY);
-        
-        this.tabControl.x = 20;
-        this.tabControl.y = 0;
-        this.tabControl.draw();
-        let yPos = 40; // Start drawing controls below the tab bar
-        for (const control of this.controls) {
-            control.x = 20;
-            control.ctx = this.ctx;
-            control.y = yPos;
-            control.draw();
-            yPos += 40;
-        }
-        
-        this.ctx.restore();
-        this.drawDrawerScrollbar();
-    }
     
-    drawDrawerHandle() {
-        const bounds = this.getDrawerHandleBounds();
-        this.ctx.save();
-        this.ctx.fillStyle = '#b0b0b0';
-        this.ctx.beginPath();
-        this.ctx.roundRect(bounds.x, bounds.y, bounds.width, bounds.height, [0, 0, 10, 10]);
-        this.ctx.fill();
-        this.ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-        this.ctx.lineWidth = 1.5;
-        for(let i = 0; i < 3; i++) {
-            const lineY = bounds.y + bounds.height/2 - 4 + i*4;
-            this.ctx.beginPath();
-            this.ctx.moveTo(bounds.x + 20, lineY);
-            this.ctx.lineTo(bounds.x + bounds.width - 20, lineY);
-            this.ctx.stroke();
-        }
-        this.ctx.restore();
-    }
-    
+    /**
+     * Checks if a point is within a given rectangle.
+     * @param {number} x - The x-coordinate.
+     * @param {number} y - The y-coordinate.
+     * @param {object} rect - The rectangle object {x, y, width, height}.
+     * @returns {boolean} True if the point is inside the rectangle.
+     */
     isPointInRect(x, y, rect) {
-        return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+        return rect && x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
     }
 
-    getDrawerHandleBounds() {
-        const handleWidth = 100;
-        return { x: this.canvas.width / 2 - handleWidth / 2, y: 0, width: handleWidth, height: this.DRAWER_HANDLE_HEIGHT };
-    }
-
+    /**
+     * Calculates metrics for the horizontal scrollbar.
+     * @returns {object} The scrollbar metrics.
+     */
     getScrollbarMetrics() {
         const firstWhiteKey = this.keys.find(k => !k.isBlack);
         if (!firstWhiteKey || !firstWhiteKey.width) return { totalWidth: 0, handleWidth: 0, trackWidth: 0 };
         const totalWidth = this.WHITE_KEYS_COUNT * firstWhiteKey.width;
         const trackWidth = this.canvas.width;
-        const handleWidth = Math.max(20, (trackWidth / totalWidth) * trackWidth);
+        const handleWidth = totalWidth > trackWidth ? Math.max(20, (trackWidth / totalWidth) * trackWidth) : 0;
         return { totalWidth, handleWidth, trackWidth };
     }
 
+    /**
+     * Calculates the bounds of the scrollbar handle.
+     * @returns {object} The handle's rectangle {x, y, width, height}.
+     */
     getScrollbarHandleBounds() {
         const { totalWidth, handleWidth, trackWidth } = this.getScrollbarMetrics();
-        if (totalWidth <= trackWidth) return { x: 0, y: this.canvas.height - this.SCROLLBAR_HEIGHT, width: 0, height: 0 };
+        if (totalWidth <= trackWidth) return null;
         const maxScroll = totalWidth - trackWidth;
         const maxHandleTravel = trackWidth - handleWidth;
         const handleX = (this.scrollOffset / maxScroll) * maxHandleTravel;
         return { x: handleX, y: this.canvas.height - this.SCROLLBAR_HEIGHT, width: handleWidth, height: this.SCROLLBAR_HEIGHT };
     }
 
+    /**
+     * Draws the horizontal scrollbar at the bottom of the canvas.
+     */
     drawScrollbar() {
         const y = this.canvas.height - this.SCROLLBAR_HEIGHT;
         const trackRadius = 8;
@@ -525,9 +590,9 @@ class PianoKeyboard {
         this.ctx.beginPath();
         this.ctx.roundRect(0, y, this.canvas.width, this.SCROLLBAR_HEIGHT, trackRadius);
         this.ctx.fill();
-        const { totalWidth, handleWidth } = this.getScrollbarMetrics();
-        if (totalWidth > this.canvas.width) {
-            const handleBounds = this.getScrollbarHandleBounds();
+        
+        const handleBounds = this.getScrollbarHandleBounds();
+        if (handleBounds) {
             const handleRadius = 6;
             this.ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
             this.ctx.beginPath();
@@ -537,21 +602,11 @@ class PianoKeyboard {
         this.ctx.restore();
     }
 
-    drawDrawerScrollbar() {
-        // To be implemented
-    }
-
-    clampDrawerScroll() {
-        // To be implemented
-    }
-
     // --- Settings Persistence ---
     saveSettings() {
         try {
             localStorage.setItem(`piano-settings-${this.canvasId}`, JSON.stringify(this.settings));
-        } catch (e) {
-            console.error("Could not save settings to localStorage.", e);
-        }
+        } catch (e) { console.error("Could not save settings.", e); }
         this.onSettingsChange(this.settings);
     }
 
@@ -559,25 +614,19 @@ class PianoKeyboard {
         try {
             const savedSettings = localStorage.getItem(`piano-settings-${this.canvasId}`);
             if (savedSettings) {
-                this.settings = JSON.parse(savedSettings);
+                this.settings = { ...this.settings, ...JSON.parse(savedSettings) };
                 this.updateControlsFromSettings();
             }
-        } catch (e) {
-            console.error("Could not load settings from localStorage.", e);
-        }
+        } catch (e) { console.error("Could not load settings.", e); }
     }
 
     updateControlsFromSettings() {
-        this.volumeSlider.value = this.settings.volume;
-        this.minVelocitySlider.value = this.settings.minVelocity;
-        this.maxVelocitySlider.value = this.settings.maxVelocity;
-    }
-
-    updateSettingsFromControls() {
-        this.settings.volume = this.volumeSlider.value;
-        this.settings.minVelocity = this.minVelocitySlider.value;
-        this.settings.maxVelocity = this.maxVelocitySlider.value;
+        // Find each control in the drawer's tab structure and update its value
+        const allControls = Object.values(this.drawer.tabs).flat();
+        allControls.forEach(control => {
+            if (this.settings.hasOwnProperty(control.id)) {
+                control.value = this.settings[control.id];
+            }
+        });
     }
 }
-
-export { PianoKeyboard };
