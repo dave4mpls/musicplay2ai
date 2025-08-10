@@ -1368,6 +1368,7 @@
 
             this.gridColors = [];
             this.activeGridInteraction = false;
+            this.resizeTimer = null;
             this.initEventListeners();
             this.resizeCanvas();
             this.animationLoop();
@@ -1476,6 +1477,14 @@
         }
 
         resizeCanvas() {
+            if (this.resizeTimer) clearTimeout(this.resizeTimer);
+            this.resizeTimer = setTimeout(() => {
+                this.performResize();
+                this.resizeTimer = null;
+            }, 25);
+        }
+
+        performResize() {
             this.canvas.width = this.canvas.clientWidth;
             this.canvas.height = this.canvas.clientHeight;
             this.drawer.updateHeight();
