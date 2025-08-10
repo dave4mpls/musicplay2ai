@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>JS Piano Roll (Formatted)</title>
+    <title>JS Piano Roll (TinySynth Loader)</title>
     <style>
         :root {
             --bg-color: #282c34;
@@ -247,27 +247,50 @@
             this.draw(); 
         }
         getNotesAsJson() { return this._notesToMessages(this.state.notes); }
-        loadFromMidi(arrayBuffer) { 
-            try { 
-                const { ppqn, messages, tempo } = MidiHandler.parse(arrayBuffer); 
-                this.loadFromJson(messages, ppqn); 
-                if (tempo) { 
-                    this.bpm = tempo; 
-                    this.dom.tempoSlider.value = tempo; 
-                    this.dom.tempoDisplay.textContent = tempo; 
-                } 
-                this.state.undoHistory = []; 
-                this.state.redoHistory = []; 
-                this._updateUndoRedoButtons(); 
-            } catch (e) { 
-                console.error("Failed to parse MIDI file:", e); 
-                alert("Error: Could not parse MIDI file."); 
-            } 
-        }
+        
         saveToMidi() { 
             const messages = this.getNotesAsJson(); 
-            return MidiHandler.write(messages, this.state.ppqn, this.bpm); 
+            const write = (messages, ppqn = 96, bpm = 120) => {
+                const buffer = [
+                    0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 
+                    0x00, 0x01, (ppqn >> 8) & 0xFF, ppqn & 0xFF
+                ]; 
+                const track = []; 
+                let lastTime = 0; 
+                const writeVlq = value => { 
+                    const bytes = []; 
+                    bytes.push(value & 0x7F); 
+                    value >>= 7; 
+                    while (value > 0) { 
+                        bytes.push((value & 0x7F) | 0x80); 
+                        value >>= 7; 
+                    } 
+                    return bytes.reverse(); 
+                }; 
+                const microSecondsPerQuarterNote = Math.round(60000000 / bpm); 
+                track.push(...writeVlq(0), 0xFF, 0x51, 0x03, 
+                           (microSecondsPerQuarterNote >> 16) & 0xFF, 
+                           (microSecondsPerQuarterNote >> 8) & 0xFF, 
+                           microSecondsPerQuarterNote & 0xFF); 
+                messages.forEach(msg => { 
+                    const deltaTime = msg.time - lastTime; 
+                    lastTime = msg.time; 
+                    track.push(...writeVlq(deltaTime)); 
+                    const statusByte = (msg.type === 'noteOn' ? 0x90 : 0x80) | (msg.channel || 0); 
+                    track.push(statusByte, msg.pitch, msg.velocity); 
+                }); 
+                track.push(...writeVlq(0)); 
+                track.push(0xFF, 0x2F, 0x00); 
+                buffer.push(0x4D, 0x54, 0x72, 0x6B); 
+                const trackLength = track.length; 
+                buffer.push((trackLength >> 24) & 0xFF, (trackLength >> 16) & 0xFF, 
+                            (trackLength >> 8) & 0xFF, trackLength & 0xFF); 
+                buffer.push(...track); 
+                return new Uint8Array(buffer).buffer; 
+            }
+            return write(messages, this.state.ppqn, this.bpm); 
         }
+
         setMode(mode) { 
             this.state.mode = mode; 
             this.canvas.style.cursor = this._getCursorStyle({x:0, y:0}); 
@@ -284,7 +307,7 @@
         pause() { 
             this.state.isPlaying = false; 
             this.state.lookaheadEvents.forEach(e => { 
-                if (e.isPlaying) this.onStopNote({ pitch: e.pitch }); 
+                if (e.isPlaying) this.onStopNote({ pitch: e.pitch, channel: e.channel }); 
             }); 
             this.draw(); 
         }
@@ -719,7 +742,7 @@
         _drawPlayheadAndMarquee() { 
             const { ctx, canvas, config, state } = this; 
             const x = config.keysWidth + this._tickToPixel(state.playheadTick) - state.scrollX; 
-            if (x > config.keysWidth && x < canvas.clientWidth) { 
+            if (x >= config.keysWidth && x < canvas.clientWidth) { 
                 ctx.fillStyle = config.playheadColor; 
                 ctx.fillRect(x, 0, 2, canvas.clientHeight); 
             } 
@@ -779,7 +802,7 @@
                     velocity: n.velocity, channel: n.channel, isPlaying: false 
                 }); 
                 s.lookaheadEvents.push({ 
-                    type: 'noteOff', tick: n.start_tick + n.duration_ticks, pitch: n.pitch 
+                    type: 'noteOff', tick: n.start_tick + n.duration_ticks, pitch: n.pitch, channel: n.channel
                 }); 
             }); 
             s.lookaheadEvents.sort((a,b) => a.tick - b.tick); 
@@ -787,37 +810,49 @@
         _playbackLoop(timestamp) { 
             const s = this.state, c = this.config, canvas = this.canvas; 
             if (!s.isPlaying) return; 
+
+            // This is the main playback loop driven by requestAnimationFrame for smooth animation
             const elapsedMs = timestamp - s.lastFrameTime; 
             s.lastFrameTime = timestamp; 
             const ticksPerSecond = (this.bpm / 60) * s.ppqn; 
             const elapsedTicks = (elapsedMs / 1000) * ticksPerSecond; 
             const newPlayheadTick = s.playheadTick + elapsedTicks; 
+
+            // Find and process all events between the last frame and this one
             s.lookaheadEvents.forEach(e => { 
                 if (e.tick >= s.playheadTick && e.tick < newPlayheadTick) { 
                     if (e.type === 'noteOn') { 
                         this.onPlayNote(e); 
-                        const on = s.lookaheadEvents.find(ev => 
-                            ev.type === 'noteOn' && ev.tick === e.tick && ev.pitch === e.pitch); 
-                        if(on) on.isPlaying = true; 
-                    } else { 
+                        // Mark the event as currently playing to handle note-offs correctly
+                        const onEvent = s.lookaheadEvents.find(ev => 
+                            ev.type === 'noteOn' && ev.tick === e.tick && ev.pitch === e.pitch && ev.channel === e.channel); 
+                        if(onEvent) onEvent.isPlaying = true; 
+                    } else { // noteOff
                         this.onStopNote(e); 
-                        const on = s.lookaheadEvents.find(ev => 
+                        // Find the corresponding noteOn event and mark it as no longer playing
+                        const onEvent = s.lookaheadEvents.find(ev => 
                             ev.type === 'noteOn' && ev.tick < e.tick && 
-                            ev.pitch === e.pitch && ev.isPlaying); 
-                        if(on) on.isPlaying = false; 
+                            ev.pitch === e.pitch && ev.channel === e.channel && ev.isPlaying); 
+                        if(onEvent) onEvent.isPlaying = false; 
                     } 
                 } 
             }); 
+
             s.playheadTick = newPlayheadTick; 
+
+            // Auto-scroll logic
             const playheadX = this._tickToPixel(s.playheadTick); 
             const viewWidth = canvas.clientWidth - c.keysWidth - c.scrollbarSize; 
             if (playheadX > s.scrollX + viewWidth * 0.8 || playheadX < s.scrollX) {
                 s.scrollX = playheadX - viewWidth * 0.2; 
             }
             this._clampScroll(); 
+
+            // Stop playback if the end is reached
             if (s.playheadTick > s.songDurationTicks) this.stop(); 
-            requestAnimationFrame(this._playbackLoop.bind(this)); 
+            
             this.draw(); 
+            requestAnimationFrame(this._playbackLoop.bind(this)); 
         }
 
         // --- MOUSE INTERACTION LOGIC ---
@@ -832,7 +867,7 @@
                 this.onPlayNote({ 
                     pitch: originalPitch, velocity: note.velocity, channel: note.channel 
                 }); 
-                setTimeout(() => { this.onStopNote({ pitch: originalPitch }); }, durationMs); 
+                setTimeout(() => { this.onStopNote({ pitch: originalPitch, channel: note.channel }); }, durationMs); 
             } 
             const isSelected = s.selectedNotes.includes(note); 
             if (e.shiftKey) { 
@@ -875,7 +910,7 @@
                         pitch: newNote.pitch, velocity: newNote.velocity, channel: newNote.channel 
                     });
                     const timerId = setTimeout(() => {
-                        this.onStopNote({ pitch: newNote.pitch });
+                        this.onStopNote({ pitch: newNote.pitch, channel: newNote.channel });
                         if (this.state.soundOnAdd && this.state.soundOnAdd.timerId === timerId) {
                             this.state.soundOnAdd = null;
                         }
@@ -963,6 +998,10 @@
             const gridX = pos.x - this.config.keysWidth + this.state.scrollX; 
             const tick = (gridX / this.config.beatWidth) * this.state.ppqn; 
             this.state.playheadTick = Math.max(0, tick); 
+            // If playing, update the lookahead events to avoid re-triggering past notes
+            if (this.state.isPlaying) {
+                this._buildLookaheadEvents();
+            }
             this.draw(); 
         }
 
@@ -1123,125 +1162,6 @@
         }
     }
 
-
-    class MidiHandler {
-        static parse(arrayBuffer) { 
-            const dataView = new DataView(arrayBuffer); 
-            let offset = 0; 
-            const readStr = len => { 
-                let s = ''; 
-                for (let i = 0; i < len; i++) s += String.fromCharCode(dataView.getUint8(offset + i)); 
-                offset += len; 
-                return s; 
-            }; 
-            const readU32 = () => { offset += 4; return dataView.getUint32(offset - 4, false); }; 
-            const readU16 = () => { offset += 2; return dataView.getUint16(offset - 2, false); }; 
-            const readVlq = () => { 
-                let value = 0; 
-                let byte; 
-                do { 
-                    byte = dataView.getUint8(offset++); 
-                    value = (value << 7) | (byte & 0x7F); 
-                } while (byte & 0x80); 
-                return value; 
-            }; 
-            if (readStr(4) !== 'MThd') throw new Error("Invalid MIDI header"); 
-            if (readU32() !== 6) throw new Error("Invalid header length"); 
-            readU16(); 
-            const trackCount = readU16(); 
-            const ppqn = readU16(); 
-            const allMessages = []; 
-            let tempo = null; 
-            for (let i = 0; i < trackCount; i++) { 
-                if (readStr(4) !== 'MTrk') throw new Error("Invalid track header"); 
-                const trackEndOffset = offset + readU32(); 
-                let absoluteTime = 0; 
-                let lastStatusByte = null; 
-                while (offset < trackEndOffset) { 
-                    absoluteTime += readVlq(); 
-                    let statusByte = dataView.getUint8(offset); 
-                    if (statusByte < 0x80) { 
-                        statusByte = lastStatusByte; 
-                        offset--; 
-                    } 
-                    offset++; 
-                    const eventType = statusByte >> 4; 
-                    const channel = statusByte & 0x0F; 
-                    if (eventType === 0x9) { 
-                        const pitch = dataView.getUint8(offset++); 
-                        const velocity = dataView.getUint8(offset++); 
-                        allMessages.push({ 
-                            type: 'noteOn', pitch, velocity, time: absoluteTime, channel 
-                        }); 
-                    } else if (eventType === 0x8) { 
-                        const pitch = dataView.getUint8(offset++); 
-                        const velocity = dataView.getUint8(offset++); 
-                        allMessages.push({ 
-                            type: 'noteOff', pitch, velocity, time: absoluteTime, channel 
-                        }); 
-                    } else if (eventType === 0xF && statusByte === 0xFF) { 
-                        const metaType = dataView.getUint8(offset++); 
-                        const len = readVlq(); 
-                        if (metaType === 0x51 && tempo === null) { 
-                            const t = (dataView.getUint8(offset) << 16) + 
-                                      (dataView.getUint8(offset+1) << 8) + 
-                                      dataView.getUint8(offset+2); 
-                            tempo = Math.round(60000000 / t); 
-                        } 
-                        if (metaType === 0x2F) { 
-                            offset = trackEndOffset; 
-                        } else { 
-                            offset += len; 
-                        } 
-                    } else { 
-                        const bytesToSkip = [0xC, 0xD].includes(eventType) ? 1 : 2; 
-                        offset += bytesToSkip; 
-                    } 
-                    lastStatusByte = statusByte; 
-                } 
-            } 
-            return { ppqn, messages: allMessages, tempo }; 
-        }
-        static write(messages, ppqn = 96, bpm = 120) { 
-            const buffer = [
-                0x4D, 0x54, 0x68, 0x64, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 
-                0x00, 0x01, (ppqn >> 8) & 0xFF, ppqn & 0xFF
-            ]; 
-            const track = []; 
-            let lastTime = 0; 
-            const writeVlq = value => { 
-                const bytes = []; 
-                bytes.push(value & 0x7F); 
-                value >>= 7; 
-                while (value > 0) { 
-                    bytes.push((value & 0x7F) | 0x80); 
-                    value >>= 7; 
-                } 
-                return bytes.reverse(); 
-            }; 
-            const microSecondsPerQuarterNote = Math.round(60000000 / bpm); 
-            track.push(...writeVlq(0), 0xFF, 0x51, 0x03, 
-                       (microSecondsPerQuarterNote >> 16) & 0xFF, 
-                       (microSecondsPerQuarterNote >> 8) & 0xFF, 
-                       microSecondsPerQuarterNote & 0xFF); 
-            messages.forEach(msg => { 
-                const deltaTime = msg.time - lastTime; 
-                lastTime = msg.time; 
-                track.push(...writeVlq(deltaTime)); 
-                const statusByte = (msg.type === 'noteOn' ? 0x90 : 0x80) | (msg.channel || 0); 
-                track.push(statusByte, msg.pitch, msg.velocity); 
-            }); 
-            track.push(...writeVlq(0)); 
-            track.push(0xFF, 0x2F, 0x00); 
-            buffer.push(0x4D, 0x54, 0x72, 0x6B); 
-            const trackLength = track.length; 
-            buffer.push((trackLength >> 24) & 0xFF, (trackLength >> 16) & 0xFF, 
-                        (trackLength >> 8) & 0xFF, trackLength & 0xFF); 
-            buffer.push(...track); 
-            return new Uint8Array(buffer).buffer; 
-        }
-    }
-
     document.addEventListener('DOMContentLoaded', () => {
         const synth = new WebAudioTinySynth({quality:1, useReverb:1});
 
@@ -1271,8 +1191,10 @@
         window.addEventListener('resize', () => pianoRoll.resizeAndDraw());
 
         const playPauseButton = document.getElementById('playPause');
+        
+        // **FIX**: Revert to the original, simple playback logic
         playPauseButton.addEventListener('click', () => { 
-            if (pianoRoll.state.isPlaying) { 
+             if (pianoRoll.state.isPlaying) { 
                 pianoRoll.pause(); 
                 playPauseButton.textContent = '▶ Play'; 
             } else { 
@@ -1280,8 +1202,14 @@
                 playPauseButton.textContent = '❚❚ Pause'; 
             } 
         });
+
         document.getElementById('stop').addEventListener('click', () => { 
+            // Stop the piano roll's internal playback
             pianoRoll.stop(); 
+            // Also send an "all sound off" to the synth to kill any hanging notes
+            for(let i = 0; i < 16; i++) {
+                synth.allSoundOff(i);
+            }
             playPauseButton.textContent = '▶ Play'; 
         });
         
@@ -1317,12 +1245,57 @@
         const saveMidiButton = document.getElementById('saveMidi'); 
         const fileInput = document.getElementById('midiFileInput'); 
         const saveLink = document.getElementById('saveLink');
+        
         loadMidiButton.addEventListener('click', () => fileInput.click()); 
         fileInput.addEventListener('change', (e) => { 
             const file = e.target.files[0]; 
             if (file) { 
                 const reader = new FileReader(); 
-                reader.onload = (event) => pianoRoll.loadFromMidi(event.target.result); 
+                reader.onload = (event) => {
+                    const arrayBuffer = event.target.result;
+                    
+                    // Stop any current playback before loading new file
+                    pianoRoll.stop();
+                    playPauseButton.textContent = '▶ Play';
+
+                    // Use tinysynth to parse the file
+                    synth.loadMIDI(arrayBuffer);
+
+                    if (synth.song) {
+                        const { timebase, ev, tempo } = synth.song;
+                        // TinySynth's timebase seems to be ppqn * 4
+                        const ppqn = timebase / 4; 
+
+                        const messages = ev.map(event => {
+                            const status = event.m[0];
+                            const command = status & 0xF0;
+                            const channel = status & 0x0F;
+
+                            if (command === 0x90 && event.m[2] > 0) { // Note On
+                                return { type: 'noteOn', pitch: event.m[1], velocity: event.m[2], time: event.t, channel };
+                            } else if (command === 0x80 || (command === 0x90 && event.m[2] === 0)) { // Note Off
+                                return { type: 'noteOff', pitch: event.m[1], velocity: event.m[2], time: event.t, channel };
+                            }
+                            return null;
+                        }).filter(Boolean);
+
+                        pianoRoll.loadFromJson(messages, ppqn);
+
+                        if (tempo) {
+                            pianoRoll.bpm = tempo;
+                            pianoRoll.dom.tempoSlider.value = tempo;
+                            pianoRoll.dom.tempoDisplay.textContent = tempo;
+                        }
+
+                        pianoRoll.state.undoHistory = [];
+                        pianoRoll.state.redoHistory = [];
+                        pianoRoll._updateUndoRedoButtons();
+                        
+                    } else {
+                        console.error("Failed to parse MIDI file with TinySynth.");
+                        alert("Error: Could not parse MIDI file.");
+                    }
+                }; 
                 reader.readAsArrayBuffer(file); 
             } 
             fileInput.value = ''; 
@@ -1352,6 +1325,9 @@
                 }
             }
         });
+
+        // Remove the syncPlayhead loop as it's no longer needed.
+        // The PianoRoll's internal _playbackLoop handles everything now.
 
         const defaultNotes = [ 
             { type: 'noteOn', pitch: 60, velocity: 100, time: 0, channel: 0 }, 
