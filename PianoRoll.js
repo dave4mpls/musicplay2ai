@@ -15,6 +15,7 @@ class PianoRoll {
         this.onMidiMessage = options.onMidiMessage || (() => {});
         this.bpm = options.bpm || 120;
         this.MAX_HISTORY = 25;
+        this.resizeTimer = null;
 
         this.config = {
             noteHeight: 16,
@@ -108,9 +109,26 @@ class PianoRoll {
         
         const onStateChange = (control) => this._onDrawerStateChange(control);
 
+        // create the tracks that starts with track 10 for drums and then does 1-16 excluding 10.  each track should have a volume knob, an instrument selector, 
+        // and a toggle switch for mute
+        const trackMapper = [10,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16];
+        const tracks = Array.from({ length: 16 }, (_, i) => {
+            const trackNumber = trackMapper[i];
+            return new RowControl({ ctx: this.ctx, id: `track${trackNumber}`, label: `Track ${trackNumber}`, controls: [
+                    new StaticTextControl({ ctx: this.ctx, id: `tracklabel${trackNumber}`, label: `${trackNumber}`, width: 20, onClick: () => {}, onStateChange }),
+                    new InstrumentControl({ ctx: this.ctx, id: `instrument${trackNumber}`, label: 'Instrument', initialValue: trackNumber === 10 ? 128 : 0, onSelect: (val) => this.setInstrument(trackNumber, val), onStateChange }),
+                    new PopupSliderControl({ ctx: this.ctx, id: `volume${trackNumber}`, label: 'Volume', min: 0, max: 127, initialValue: 127, width: 100, height: 120, onStateChange }),
+                    new ToggleSwitch({ ctx: this.ctx, id: `mute${trackNumber}`, label: 'Mute', onClick: () => this.toggleMute(trackNumber), onStateChange }),
+                    new ToggleSwitch({ ctx: this.ctx, id: `mute${trackNumber}`, label: 'Chord Change', onClick: () => this.toggleMute(trackNumber), onStateChange }),
+                ]
+            });
+        });
+
+        // return the structure for the drawer tabs
         return {
             'File': [
                 new ButtonControl({ 
+                    id: 'load',
                     ctx: this.ctx, 
                     autoSize: true, 
                     label: 'Load MIDI', 
@@ -118,6 +136,7 @@ class PianoRoll {
                     onStateChange 
                 }),
                 new ButtonControl({ 
+                    id: 'save',
                     ctx: this.ctx, 
                     autoSize: true, 
                     label: 'Save MIDI', 
@@ -126,20 +145,23 @@ class PianoRoll {
                 })
             ],
             'Edit': [
-                new ButtonControl({ ctx: this.ctx, label: 'Add', isActive: () => this.state.mode === 'add', onClick: () => this.setMode('add'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Select', isActive: () => this.state.mode === 'select', onClick: () => this.setMode('select'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Pan', isActive: () => this.state.mode === 'pan', onClick: () => this.setMode('pan'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Delete', onClick: () => this.deleteNotes(), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: '↶ Undo', isActive: () => this.state.undoHistory.length > 0, onClick: () => this.undo(), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: '↷ Redo', isActive: () => this.state.redoHistory.length > 0, onClick: () => this.redo(), onStateChange }),
-                new DropdownControl({ ctx: this.ctx, label: 'Channel', options: channelOptions, initialValue: this.state.currentChannel, onSelect: (val) => this.setCurrentChannel(val), onStateChange }),
-                new DropdownControl({ ctx: this.ctx, label: 'Size', options: sizeOptions, width: 60, showLabel: false, initialValue: this.state.noteSize, onSelect: (val) => this.state.noteSize = val, onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'add', label: 'Add', isActive: () => this.state.mode === 'add', onClick: () => this.setMode('add'), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'select',label: 'Select', isActive: () => this.state.mode === 'select', onClick: () => this.setMode('select'), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'pan', label: 'Pan', isActive: () => this.state.mode === 'pan', onClick: () => this.setMode('pan'), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'delete', label: 'Delete', onClick: () => this.deleteNotes(), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'undo', label: '↶ Undo', isActive: () => this.state.undoHistory.length > 0, onClick: () => this.undo(), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'redo', label: '↷ Redo', isActive: () => this.state.redoHistory.length > 0, onClick: () => this.redo(), onStateChange }),
+                new DropdownControl({ ctx: this.ctx, id: 'channel', label: 'Channel', options: channelOptions, initialValue: this.state.currentChannel, onSelect: (val) => this.setCurrentChannel(val), onStateChange }),
+                new DropdownControl({ ctx: this.ctx, id: 'size', label: 'Size', options: sizeOptions, width: 60, showLabel: false, initialValue: this.state.noteSize, onSelect: (val) => this.state.noteSize = val, onStateChange }),
+            ],
+            'Tracks': [
+                ...tracks,
             ],
             'Playback': [
-                new ButtonControl({ ctx: this.ctx, label: 'Play', isActive: () => this.state.isPlaying, onClick: () => this.state.isPlaying ? this.pause() : this.play(), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Stop', onClick: () => this.stop(), onStateChange }),
-                new PopupSliderControl({ ctx: this.ctx, label: `Tempo`, min: 40, max: 240, height: 120, initialValue: this.bpm, width: 100, onStateChange }),
-                new ToggleSwitch({ ctx: this.ctx, label: 'Play on Click', initialValue: this.state.playOnClick, onStateChange: (c) => this.setPlayOnClick(c.value) }),
+                new ButtonControl({ ctx: this.ctx, id: 'play', label: 'Play', isActive: () => this.state.isPlaying, onClick: () => this.state.isPlaying ? this.pause() : this.play(), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'stop', label: 'Stop', onClick: () => this.stop(), onStateChange }),
+                new PopupSliderControl({ ctx: this.ctx, id: 'bpm', label: `Tempo`, min: 40, max: 240, height: 120, initialValue: this.bpm, width: 100, onStateChange }),
+                new ToggleSwitch({ ctx: this.ctx, id: 'playOnClick', label: 'Play on Click', initialValue: this.state.playOnClick, onStateChange: (c) => this.setPlayOnClick(c.value) }),
             ]
         };
     }
@@ -196,7 +218,7 @@ class PianoRoll {
                     const arrayBuffer = event.target.result;
                     
                     // Stop any current playback before loading new file
-                    pianoRoll.stop();
+                    this.stop();
 
                     // Use tinysynth to parse the file
                     synth.loadMIDI(arrayBuffer);
@@ -215,20 +237,36 @@ class PianoRoll {
                                 return { type: 'noteOn', pitch: event.m[1], velocity: event.m[2], time: event.t, channel };
                             } else if (command === 0x80 || (command === 0x90 && event.m[2] === 0)) { // Note Off
                                 return { type: 'noteOff', pitch: event.m[1], velocity: event.m[2], time: event.t, channel };
+                            } else {
+                                return { type: 'other', msg: event.m, time: event.t }
                             }
                             return null;
                         }).filter(Boolean);
 
-                        pianoRoll.loadFromJson(messages, ppqn);
+                        this.loadFromJson(messages, ppqn);
 
-                        if (tempo) {
-                            pianoRoll.bpm = tempo;
-                            pianoRoll.dom.tempoSlider.value = tempo;
-                            pianoRoll.dom.tempoDisplay.textContent = tempo;
+                        const tempoEvent = ev.find(e => e.m[0] === 0xff && e.m[1] === 0x51);
+                        if (tempoEvent) {
+                            // The tempo is stored in three bytes, representing microseconds per quarter note.
+                            const microsecondsPerQuarterNote = (tempoEvent.m[2] << 16) | (tempoEvent.m[3] << 8) | tempoEvent.m[4];
+                            
+                            // Convert microseconds per quarter note to BPM.
+                            const calculatedBpm = 60000000 / microsecondsPerQuarterNote;
+
+                            pianoRoll.bpm = calculatedBpm;
+
+                            // Find the tempo slider in the drawer to update it
+                            const playbackTab = pianoRoll.drawer.tabs['Playback'];
+                            if (playbackTab) {
+                                const tempoSliderControl = playbackTab.find(c => c instanceof PopupSliderControl);
+                                if (tempoSliderControl) {
+                                    tempoSliderControl.slider.value = Math.round(calculatedBpm);
+                                }
+                            }
                         }
 
-                        pianoRoll.state.undoHistory = [];
-                        pianoRoll.state.redoHistory = [];
+                        this.state.undoHistory = [];
+                        this.state.redoHistory = [];
                         
                     } else {
                         console.error("Failed to parse MIDI file with TinySynth.");
@@ -288,6 +326,10 @@ class PianoRoll {
                 const deltaTime = msg.time - lastTime; 
                 lastTime = msg.time; 
                 track.push(...writeVlq(deltaTime)); 
+                if (msg.type === 'other') {
+                    track.push(...msg.msg);
+                    return;
+                }
                 const statusByte = (msg.type === 'noteOn' ? 0x90 : 0x80) | (msg.channel || 0); 
                 track.push(statusByte, msg.pitch, msg.velocity); 
             }); 
@@ -324,8 +366,22 @@ class PianoRoll {
         this.draw(); 
     }
     stop() { this.pause(); this.state.playheadTick = 0; this.draw(); }
-    resizeAndDraw() { this._setupCanvas(); this.draw(); }
-    
+    resizeAndDraw() {
+        // Clear any existing timer to reset the countdown
+        if (this.resizeTimer) clearTimeout(this.resizeTimer);
+
+        // Set a new timer
+        this.resizeTimer = setTimeout(() => {
+            this._performResize(); // Call the actual resize logic
+            this.resizeTimer = null;
+        }, 25); // 25ms delay is a good starting point
+    }
+    _performResize() {
+        this._setupCanvas();
+        this.drawer.updateHeight();
+        this.draw();
+    }
+
     undo() { 
         if (this.state.undoHistory.length === 0) return; 
         this.state.redoHistory.push(JSON.parse(JSON.stringify(this.state.notes))); 
@@ -352,7 +408,7 @@ class PianoRoll {
     }
 
     _setupCanvas() { 
-        const dpr = window.devicePixelRatio || 1; 
+        const dpr = /* window.devicePixelRatio doesn't work right || */ 1; 
         const rect = this.canvas.parentElement.getBoundingClientRect(); 
         this.canvas.width = rect.width * dpr; 
         this.canvas.height = rect.height * dpr; 
@@ -372,6 +428,8 @@ class PianoRoll {
 
     // --- EVENT HANDLING ---
     _attachEventListeners() {
+        new ResizeObserver(() => this.resizeAndDraw()).observe(this.canvas);
+
         const c = this.canvas;
         c.addEventListener('mousedown', this._onInteractionStart.bind(this));
         c.addEventListener('touchstart', this._onInteractionStart.bind(this), { passive: false });
@@ -442,17 +500,23 @@ class PianoRoll {
 
         if (this._handleScrollbarMouseDown(pos)) return;
 
-        const isGridClick = pos.x > this.config.keysWidth && 
+        const isGridClick = pos.x > this.config.keysWidth &&
                             pos.x < this.canvas.clientWidth - this.config.scrollbarSize;
         if (isGridClick) {
-            const note = this._getNoteAt(pos); // Use adjusted pos
-            const isResizeHandle = this._getCursorStyle(pos) === 'ew-resize'; 
+            // First, find the note at the adjusted position
+            const note = this._getNoteAt(pos.x, pos.y);
 
-            if (isResizeHandle && note) {
+            // Now, determine the cursor style at that exact position to see if it's a resize handle
+            const cursorStyle = this._getCursorStyle(pos);
+
+            if (note && cursorStyle === 'ew-resize') {
+                // It's a resize action
                 this._handleResizeMouseDown(note, pos);
             } else if (note) {
+                // It's a drag action on an existing note
                 this._handleNoteMouseDown(e, note, pos);
             } else {
+                // No note was clicked, so it's a grid action (add or marquee select)
                 this._handleGridMouseDown(e, pos);
             }
         }
@@ -770,6 +834,10 @@ class PianoRoll {
         const s = this.state; 
         s.lookaheadEvents = []; 
         s.notes.forEach(n => { 
+            if (n.type === 'other') {
+                s.lookaheadEvents.push({ type: 'other', tick: n.time, msg: n.msg });
+                return;
+            }
             s.lookaheadEvents.push({ 
                 type: 'noteOn', tick: n.start_tick, pitch: n.pitch, 
                 velocity: n.velocity, channel: n.channel, isPlaying: false 
@@ -800,14 +868,17 @@ class PianoRoll {
                     const onEvent = s.lookaheadEvents.find(ev => 
                         ev.type === 'noteOn' && ev.tick === e.tick && ev.pitch === e.pitch && ev.channel === e.channel); 
                     if(onEvent) onEvent.isPlaying = true; 
-                } else { // noteOff
+                } else if (e.type === 'noteOff') { // noteOff
                     this.onStopNote(e); 
                     // Find the corresponding noteOn event and mark it as no longer playing
                     const onEvent = s.lookaheadEvents.find(ev => 
                         ev.type === 'noteOn' && ev.tick < e.tick && 
                         ev.pitch === e.pitch && ev.channel === e.channel && ev.isPlaying); 
                     if(onEvent) onEvent.isPlaying = false; 
-                } 
+                } else {
+                    // Handle other MIDI events if necessary
+                    this.onMidiMessage(e.msg);
+                }
             } 
         }); 
 
@@ -907,23 +978,26 @@ class PianoRoll {
         }); 
         this.draw(); 
     }
-    _handleResizeMouseDown(note, pos) { 
-        this._saveStateForUndo(); 
-        const s = this.state; 
-        s.isResizing = true; 
-        if (!s.selectedNotes.includes(note)) s.selectedNotes = [note]; 
-        s.resizeStartTicks = this._pixelToGrid(this._getGridPos(pos)).tick; 
-        s.selectedNotes.forEach(n => { n.originalDuration = n.duration_ticks; }); 
+    _handleResizeMouseDown(note, pos) {
+        this._saveStateForUndo();
+        const s = this.state;
+        s.isResizing = true;
+        if (!s.selectedNotes.includes(note)) s.selectedNotes = [note];
+        // Use the new precise function to get the exact starting tick
+        s.resizeStartTicks = this._pixelToTick(this._getGridPos(pos).x);
+        s.selectedNotes.forEach(n => { n.originalDuration = n.duration_ticks; });
     }
-    _handleNoteResize(pos) { 
-        const s = this.state; 
-        const currentTick = this._pixelToGrid(this._getGridPos(pos)).tick; 
-        const deltaTicks = currentTick - s.resizeStartTicks; 
-        s.selectedNotes.forEach(n => { 
-            const newDuration = n.originalDuration + deltaTicks; 
-            n.duration_ticks = Math.max(s.ppqn / 16, newDuration); 
-        }); 
-        this.draw(); 
+    _handleNoteResize(pos) {
+        const s = this.state;
+        // Use the precise function for the current mouse position
+        const currentTick = this._pixelToTick(this._getGridPos(pos).x);
+        const deltaTicks = currentTick - s.resizeStartTicks;
+
+        s.selectedNotes.forEach(n => {
+            const newDuration = n.originalDuration + deltaTicks;
+            // Ensure duration doesn't become negative or smaller than a 64th note
+            n.duration_ticks = Math.max(s.ppqn / 16, newDuration);
+        });
     }
     _handleMarqueeSelect(pos) { 
         this.state.marquee.x2 = pos.x; 
@@ -941,23 +1015,29 @@ class PianoRoll {
         } 
         return false; 
     }
-    _handleScrollbarMouseMove(pos) { 
-        const c = this.config, s = this.state, canvas = this.canvas; 
-        const { clientWidth, clientHeight } = this._getClientDimensions(); 
-        const contentWidth = c.beatWidth * c.totalBeats; 
-        const contentHeight = c.noteHeight * c.totalPitches; 
-        const viewWidth = clientWidth - c.keysWidth - c.scrollbarSize; 
-        const viewHeight = clientHeight - c.timelineHeight - c.scrollbarSize; 
-        if (s.isDraggingVScroll) { 
-            const dy = pos.y - s.lastMousePos.y; 
-            s.scrollY += dy * (contentHeight / (clientHeight - c.timelineHeight)); 
-        } 
-        if (s.isDraggingHScroll) { 
-            const dx = pos.x - s.lastMousePos.x; 
-            s.scrollX += dx * (contentWidth / viewWidth); 
-        } 
-        this._clampScroll(); 
-        this.draw(); 
+    _handleScrollbarMouseMove(pos) {
+        const c = this.config, s = this.state;
+        const { clientWidth, clientHeight } = this._getClientDimensions();
+        const contentWidth = c.beatWidth * c.totalBeats;
+        const contentHeight = c.noteHeight * c.totalPitches;
+
+        if (s.isDraggingVScroll) {
+            // Correctly calculate the visible height of the scrollable area
+            const trackHeight = clientHeight - c.timelineHeight - c.scrollbarSize;
+            const dy = pos.y - s.lastMousePos.y;
+            // The change in scrollY should be proportional to the change in mouse position
+            s.scrollY += dy * (contentHeight / trackHeight);
+        }
+        if (s.isDraggingHScroll) {
+            // Correctly calculate the visible width of the scrollable area
+            const trackWidth = clientWidth - c.keysWidth - c.scrollbarSize;
+            const dx = pos.x - s.lastMousePos.x;
+            // The change in scrollX should be proportional to the change in mouse position
+            s.scrollX += dx * (contentWidth / trackWidth);
+        }
+
+        this._clampScroll();
+        // No need to call draw() here; the animation loop will handle it.
     }
     _handlePan(pos) { 
         const dx = pos.x - this.state.lastMousePos.x; 
@@ -1021,6 +1101,9 @@ class PianoRoll {
         return this.canvas.clientHeight - this.drawer.getHeight();
     }
     _tickToPixel(tick) { return (tick / this.state.ppqn) * this.config.beatWidth; }
+    _pixelToTick(pixel) {
+        return (pixel / this.config.beatWidth) * this.state.ppqn;
+    }
     _pitchToPixel(pitch) { return (this.config.totalPitches - 1 - pitch) * this.config.noteHeight; }
     _getNoteRect(note) { 
         const x = this._tickToPixel(note.start_tick); 
@@ -1117,10 +1200,12 @@ class PianoRoll {
                     const nOn = openNotes[key]; 
                     notes.push({ 
                         pitch: nOn.pitch, velocity: nOn.velocity, channel: nOn.channel, 
-                        start_tick: nOn.time, duration_ticks: msg.time - nOn.time 
+                        start_tick: nOn.time, duration_ticks: msg.time - nOn.time, type: 'note'
                     }); 
                     delete openNotes[key]; 
                 } 
+            } else if (msg.type === 'other') {
+                notes.push({ time: msg.time, msg: msg.msg, type: 'other'})
             } 
         }); 
         return notes; 
@@ -1128,6 +1213,10 @@ class PianoRoll {
     _notesToMessages(notes) { 
         const messages = []; 
         notes.forEach(n => { 
+            if (n.type === 'other') {
+                messages.push({ type: 'other', time: n.time, msg: n.msg });
+                return;
+            }
             messages.push({ 
                 type: 'noteOn', pitch: n.pitch, velocity: n.velocity, 
                 time: n.start_tick, channel: n.channel || 0, 

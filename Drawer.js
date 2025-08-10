@@ -15,11 +15,12 @@ const MIDI_INSTRUMENTS = [
         { value: 4, text: "Electric Piano 1" }, { value: 5, text: "Electric Piano 2" },
         { value: 6, text: "Harpsichord" }, { value: 7, text: "Clavinet" }
     ]},
-    { name: "Chromatic Percussion", instruments: [
+    { name: "Percussion", instruments: [
         { value: 8, text: "Celesta" }, { value: 9, text: "Glockenspiel" },
         { value: 10, text: "Music Box" }, { value: 11, text: "Vibraphone" },
         { value: 12, text: "Marimba" }, { value: 13, text: "Xylophone" },
-        { value: 14, text: "Tubular Bells" }, { value: 15, text: "Dulcimer" }
+        { value: 14, text: "Tubular Bells" }, { value: 15, text: "Dulcimer" },
+        { value: 128, text: "Standard Drums"}
     ]},
     { name: "Organ", instruments: [
         { value: 16, text: "Drawbar Organ" }, { value: 17, text: "Percussive Organ" },
@@ -410,7 +411,7 @@ class ButtonControl extends BaseControl {
         return { x: this.x, y: this.y, width: this.width, height: this.height };
     }
 
-    draw() {
+    draw(substituteText = null) {
         const bounds = this.getBounds();
         this.ctx.save();
         const active = this.isActive();
@@ -432,7 +433,7 @@ class ButtonControl extends BaseControl {
         this.ctx.fillStyle = this.isPressed || active ? '#fff' : '#333';
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'middle';
-        this.ctx.fillText(this.label, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        this.ctx.fillText(substituteText ||this.label, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
         this.ctx.restore();
     }
 
@@ -463,6 +464,116 @@ class ButtonControl extends BaseControl {
             this.ctx.restore();
         }
     }
+}
+
+class StaticTextControl extends BaseControl {
+    constructor(config) {
+        super(config);
+        this.width = config.width || 80;
+        this.height = config.height || 28;
+        this.onClick = config.onClick || (() => {});
+        this.autoSize = config.autoSize || false;
+        this.padding = config.padding || 10; // Horizontal padding right only
+    }
+
+    getBounds() {
+        return { x: this.x, y: this.y, width: this.width, height: this.height };
+    }
+
+    draw(substituteText = null) {
+        const bounds = this.getBounds();
+        this.ctx.save();
+
+        // fill style is transparent
+        this.ctx.fillStyle = 'transparent';
+        this.ctx.strokeStyle = '#999';
+
+        this.ctx.font = this.font;
+        this.ctx.fillStyle = '#333';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(substituteText ||this.label, bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+        this.ctx.restore();
+    }
+
+    onPointerDown(x, y) {
+        return null;
+    }
+
+    onPointerUp() {
+        this.isPressed = false;
+        return { action: 'release' };
+    }
+
+    isPointOnControl(x, y) {
+        return false;  // static text does not respond to clicks
+    }
+    updateWidth() {
+        if (this.autoSize) {
+            this.ctx.save();
+            this.ctx.font = this.font;
+            const textMetrics = this.ctx.measureText(this.label);
+            this.width = textMetrics.width + this.padding;
+            this.ctx.restore();
+        }
+    }
+}
+
+class RowControl extends BaseControl {
+    constructor(config) {
+        super(config);
+        this.width = 0;
+        this.height = 0;
+        this.controls = config.controls || [];
+    }
+
+    getBounds() {
+        // the bounds of the row control are the minimum x and y of any controls 
+        // and the maximum of x+height, y+height of all controls
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        this.controls.forEach(control => {  
+            const bounds = control.getBounds();
+            minX = Math.min(minX, bounds.x);
+            minY = Math.min(minY, bounds.y);
+            maxX = Math.max(maxX, bounds.x + bounds.width);
+            maxY = Math.max(maxY, bounds.y + bounds.height);
+        });
+        return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    }
+
+    draw() {
+        // to draw the row control, we need to draw each child control
+        this.ctx.save();
+        this.controls.forEach(control => {
+            control.draw();
+        });
+        this.ctx.restore();
+    }
+
+    onPointerDown(x, y) {
+        // Check if the pointer is on any of the child controls
+        for (const control of this.controls) {
+            if (control.isPointOnControl(x, y)) {
+                // If a control is found to match, it handles its own pointer down
+                const result = control.onPointerDown(x, y);
+                if (result) {
+                    return result;
+                }
+            }
+        }
+        return null;
+    }
+
+    isPointOnControl(x, y) {
+        // Check if the point is within the bounds of any child control
+        for (const control of this.controls) {
+            if (control.isPointOnControl(x, y)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
 }
 
 // NOTE: Dropdown, InstrumentControl and PopupSlider are complex "Overlay" controls.
@@ -1080,8 +1191,7 @@ class PopupSliderControl extends ButtonControl {
     }
 
     draw(isOverlay = false) {
-        this.label = `Tempo: ${this.slider.value}`;
-        super.draw(); // Draw the button part
+        super.draw(`${this.label}: ${this.slider.value}`); // Draw the button part
 
         if (this.isOpen && isOverlay) {
             const popupBounds = this.getPopupBounds();
@@ -1259,8 +1369,9 @@ class Drawer {
         this.TAB_HEIGHT = config.tabHeight;
         this.SCROLLBAR_SIZE = 18;
         this.CONTROL_PADDING = { x: 20, y: 20 };
-        this.CONTROL_SPACING = { x: 20, y: 25 };
+        this.CONTROL_SPACING = { x: 20, y: 10 };
         this.handleEvent = this.handleEvent.bind(this);
+        this.layoutControls = this.layoutControls.bind(this);
     }
     
     getHeight() { return this.calculatedHeight; }
@@ -1360,25 +1471,7 @@ class Drawer {
             return;
         }
 
-        // --- PRIORITY 3: Delegate to controls if no interaction is active ---
-        const pointerXInDrawer = x + this.scrollOffsetX;
-        const pointerYInDrawer = y + this.scrollOffsetY;
-        const controls = this.tabs[this.activeTab];
-        let controlUnderPointer = null;
-        for (const control of controls) {
-            if (control.isPointOnControl(pointerXInDrawer, pointerYInDrawer)) {
-                controlUnderPointer = control;
-                break;
-            }
-        }
-
-        if (controlUnderPointer) {
-                const controlEvent = { ...event, x: pointerXInDrawer, y: pointerYInDrawer, owner: controlUnderPointer };
-                this.eventBroker.dispatchEvent(controlEvent, controlUnderPointer);
-                return;
-        }
-
-        // --- PRIORITY 4: Handle NEW drawer-level interactions ---
+        // --- PRIORITY 3: Certain drawer elements being started that are on top of the controls ---
         if (event.type === 'pointerdown') {
             if (this.isPointInRect(x, y, this.getHandleBounds())) {
                 // Start a drag interaction, storing the start position.
@@ -1417,6 +1510,33 @@ class Drawer {
                     return;
                 }
             }
+        }
+
+        // --- PRIORITY 4: Delegate to controls if no interaction is active ---
+        const pointerXInDrawer = x + this.scrollOffsetX;
+        const pointerYInDrawer = y + this.scrollOffsetY;
+        const controls = this.tabs[this.activeTab];
+        let controlUnderPointer = null;
+        for (const control of controls) {
+            if (control.isPointOnControl(pointerXInDrawer, pointerYInDrawer)) {
+                controlUnderPointer = control;
+                break;
+            }
+        }
+        if (controlUnderPointer) {
+                const controlEvent = { ...event, x: pointerXInDrawer, y: pointerYInDrawer, owner: controlUnderPointer };
+                this.eventBroker.dispatchEvent(controlEvent, controlUnderPointer);
+                return;
+        }
+
+        if (event.type === 'wheel') {
+            this.scrollOffsetY += event.deltaY; // Adjust vertical scroll offset by wheel amount
+            this.clampScroll();                // Ensure scroll position is valid
+            return;                            // Event is handled, stop processing
+        }
+
+        // --- PRIORITY 5: Panningn the drawer ---
+        if (event.type === 'pointerdown') {
 
             this.activeInteraction = { type: 'pan', lastX: x, lastY: y };
         }
@@ -1569,11 +1689,26 @@ class Drawer {
         this.ctx.restore();
     }
 
-    layoutControls(controls) {
+    layoutControls(controls, isNested = false, nestedX = 0, nestedY = 0) {
         let xPos = this.CONTROL_PADDING.x;
         let yPos = this.TAB_HEIGHT + this.CONTROL_PADDING.y;
+        if (isNested) {
+            xPos = nestedX;
+            yPos = nestedY;
+        }
         
+        let maxH = 0;
         for (const control of controls) {
+            // see if we have increased the height of the drawer
+            maxH = Math.max(maxH, control.y + control.height);
+            // If the control is a row control, we should lay those out in a row, then return to the start of the next row.
+            if (control instanceof RowControl) {
+                const childMaxH = this.layoutControls(control.controls, true, xPos, yPos); // Recursive call to handle nested arrays
+                xPos = this.CONTROL_PADDING.x; // Reset xPos for the next row   
+                // when returning to the next row we have to add the height of the controls in this row, plus padding
+                yPos = childMaxH + this.CONTROL_SPACING.y;
+                continue;
+            }
             // Before laying out, ask the control to update its width if it can.
             if (typeof control.updateWidth === 'function') {
                 control.updateWidth();
@@ -1583,6 +1718,7 @@ class Drawer {
             control.y = yPos;
             xPos += cWidth + this.CONTROL_SPACING.x;
         }
+        return maxH;
     }
 
     getTabBounds() {
@@ -1625,9 +1761,18 @@ class Drawer {
         this.layoutControls(controls);
         let maxW = 0, maxH = 0;
         controls.forEach(c => {
-            let cWidth = (c instanceof ToggleSwitch) ? c.getFullWidth() : c.width;
-            maxW = Math.max(maxW, c.x + cWidth + this.CONTROL_PADDING.x);
-            maxH = Math.max(maxH, c.y + c.height);
+            if (c instanceof RowControl) {
+                // If it's a nested array, we need to calculate the max width and height of the nested controls
+                c.controls.forEach(nestedControl => {
+                    let nestedWidth = (nestedControl instanceof ToggleSwitch) ? nestedControl.getFullWidth() : nestedControl.width;
+                    maxW = Math.max(maxW, nestedControl.x + nestedWidth + this.CONTROL_PADDING.x);
+                    maxH = Math.max(maxH, nestedControl.y + nestedControl.height);
+                })
+            } else {
+                let cWidth = (c instanceof ToggleSwitch) ? c.getFullWidth() : c.width;
+                maxW = Math.max(maxW, c.x + cWidth + this.CONTROL_PADDING.x);
+                maxH = Math.max(maxH, c.y + c.height);
+            }
         });
         
         return { contentWidth: maxW, contentHeight: maxH, visibleWidth, visibleHeight, totalTabWidth };
@@ -1681,7 +1826,7 @@ class Drawer {
     }
 }
 
-    /**
+/**
  * ===================================================================
  * EVENT BROKER
  * ===================================================================
@@ -1747,222 +1892,5 @@ class EventBroker {
     }
 }
 
-
-/**
- * ===================================================================
- * DEMO APPLICATION
- * ===================================================================
- */
-class DrawerDemo {
-    constructor(canvasId) {
-        this.canvas = document.getElementById(canvasId);
-        this.ctx = this.canvas.getContext('2d');
-        
-        this.state = {
-            mode: 'pan', currentChannel: 0, noteSize: 480,
-            bpm: 120, isPlaying: false, playOnClick: true, pan: 64,
-            instrument: 0, // Added for the new control
-            vol: [127,127,127,127,127,127,127,127,127,127,127,127,127,127,127,127],
-        };
-        
-        // The EventBroker now manages interactions
-        this.eventBroker = new EventBroker(this.drawer);
-        
-        this.drawer = new Drawer({
-            ctx: this.ctx, tabs: this.initTabs(),
-            onStateChange: this.onStateChange.bind(this),
-            eventBroker: this.eventBroker,
-            handleHeight: 20, tabHeight: 30,
-        });
-        // Now that drawer is created, we can assign it to the broker
-        this.eventBroker.drawer = this.drawer;
-
-        this.gridColors = [];
-        this.activeGridInteraction = false;
-        this.resizeTimer = null;
-        this.initEventListeners();
-        this.resizeCanvas();
-        this.animationLoop();
-    }
-
-    initTabs() {
-        const ppqn = 480;
-        const sizeOptions = [
-            { text: '𝅘𝅥𝅰', value: ppqn / 8 }, { text: '𝅘𝅥𝅯', value: ppqn / 4 },
-            { text: '♪', value: ppqn / 2 }, { text: '♩', value: ppqn },
-            { text: '♩.', value: ppqn * 1.5 }, { text: '𝅗𝅥', value: ppqn * 2 },
-            { text: '𝅝', value: ppqn * 4 },
-        ];
-        const channelOptions = Array.from({length: 16}, (_, i) => ({ text: `Ch ${i + 1}`, value: i }));
-        
-        const onStateChange = (control) => this.onStateChange(control);
-
-        return {
-            'File': [
-                new ButtonControl({ ctx: this.ctx, autoSize: true, label: 'Load MIDI File', onClick: () => console.log('Load'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, autoSize: true, label: 'Save MIDI File', onClick: () => console.log('Save'), onStateChange }),
-            ],
-            'Edit': [
-                new ButtonControl({ ctx: this.ctx, label: 'Add', isActive: () => this.state.mode === 'add', onClick: () => this.state.mode = 'add', onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Select', isActive: () => this.state.mode === 'select', onClick: () => this.state.mode = 'select', onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: 'Pan', isActive: () => this.state.mode === 'pan', onClick: () => this.state.mode = 'pan', onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: '↶ Undo', onClick: () => console.log('Undo'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, label: '↷ Redo', onClick: () => console.log('Redo'), onStateChange }),
-                new DropdownControl({ ctx: this.ctx, label: 'Channel', options: channelOptions, initialValue: this.state.currentChannel, onSelect: (val) => this.state.currentChannel = val, onStateChange }),
-                new DropdownControl({ ctx: this.ctx, label: 'Size', options: sizeOptions, width: 60, showLabel: false, initialValue: this.state.noteSize, onSelect: (val) => this.state.noteSize = val, onStateChange }),
-            ],
-            'Sound': [
-                    new InstrumentControl({ ctx: this.ctx, label: 'Instrument', initialValue: this.state.instrument, onSelect: (val) => this.state.instrument = val, onStateChange }),
-                    new PopupSliderControl({ ctx: this.ctx, label: `Tempo`, min: 40, max: 240, height: 120, initialValue: this.state.bpm, width: 100, onStateChange }),
-                    new SliderControl({ctx: this.ctx, label: 'Volume', min: 0, max: 127, initialValue: 100, onStateChange }),
-                    new KnobControl({ctx: this.ctx, label: 'Pan', min:0, max: 127, initialValue: this.state.pan, onStateChange }),
-                    ...Array.from({length: 16}, (_, i) => new KnobControl({ctx: this.ctx, label: `Vol${i+1}`, min:0, max: 127, initialValue: this.state.vol[i], onStateChange }))
-            ],
-            'Options': [
-                new ButtonControl({ ctx: this.ctx, label: 'Play', isActive: () => this.state.isPlaying, onClick: () => this.state.isPlaying = !this.state.isPlaying, onStateChange }),
-                new ToggleSwitch({ ctx: this.ctx, label: 'Play Notes on Click', initialValue: this.state.playOnClick, onStateChange }),
-            ]
-        };
-    }
-
-    initEventListeners() {
-        new ResizeObserver(() => this.resizeCanvas()).observe(this.canvas);
-
-        this.canvas.addEventListener('pointerdown', (e) => {
-            e.preventDefault();
-            const event = { type: 'pointerdown', ...this.getCanvasCoordinates(e) };
-
-            // If a control is captured OR the click is inside the drawer,
-            // let the drawer handle it. This is now consistent with pointermove.
-            if (this.eventBroker.capturedControl || this.drawer.isPointInBounds(event.x, event.y)) {
-                this.drawer.handleEvent(event);
-            } else {
-                // This only runs for clicks on the background grid.
-                this.activeGridInteraction = true;
-                this.changeCellColor(event.x, event.y);
-            }
-        });
-
-        window.addEventListener('pointermove', (e) => {
-            const event = { type: 'pointermove', ...this.getCanvasCoordinates(e) };
-
-            // If a control is captured or a drawer interaction is active, the drawer handles it.
-            if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
-                e.preventDefault();
-                this.drawer.handleEvent(event);
-            } else if (this.activeGridInteraction) {
-                this.changeCellColor(event.x, event.y);
-            } else if (this.drawer.isPointInBounds(event.x, event.y)) {
-                // Also handle hover effects by passing the event to the drawer.
-                this.drawer.handleEvent(event);
-            }
-        });
-
-        window.addEventListener('pointerup', (e) => {
-                const event = { type: 'pointerup', ...this.getCanvasCoordinates(e) };
-                // Let the drawer handle all pointerup events that might concern it.
-                if (this.eventBroker.capturedControl || this.drawer.activeInteraction) {
-                    e.preventDefault();
-                    this.drawer.handleEvent(event);
-                }
-            this.activeGridInteraction = false;
-        });
-
-        this.canvas.addEventListener('wheel', (e) => {
-            const event = { type: 'wheel', deltaY: e.deltaY, ...this.getCanvasCoordinates(e) };
-            // Let the drawer handle wheel events if a control is captured or pointer is over drawer.
-            if (this.eventBroker.capturedControl || this.drawer.isPointInBounds(event.x, event.y)) {
-                e.preventDefault();
-                this.drawer.handleEvent(event);
-            }
-        }, { passive: false });
-    }
-
-    onStateChange(control) {
-        // A central place to update the main app state if needed
-        // For example: this.state.bpm = control.value;
-    }
-
-    getCanvasCoordinates(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    }
-
-    resizeCanvas() {
-        if (this.resizeTimer) clearTimeout(this.resizeTimer);
-        this.resizeTimer = setTimeout(() => {
-            this.performResize();
-            this.resizeTimer = null;
-        }, 25);
-    }
-
-    performResize() {
-        this.canvas.width = this.canvas.clientWidth;
-        this.canvas.height = this.canvas.clientHeight;
-        this.drawer.updateHeight();
-        this.generateGridColors();
-    }
-
-    generateGridColors() {
-        this.gridColors = [];
-        for (let i = 0; i < 20 * 30; i++) {
-            this.gridColors.push(`hsl(${Math.random() * 360}, 70%, 50%)`);
-        }
-    }
-
-    changeCellColor(x, y) {
-        const drawerHeight = this.drawer.getHeight();
-        if (y < drawerHeight) return;
-
-        const numCols = 20;
-        const cellWidth = this.canvas.width / numCols;
-        const col = Math.floor(x / cellWidth);
-        const row = Math.floor((y - drawerHeight) / cellWidth);
-        const index = row * numCols + col;
-
-        if (index >= 0 && index < this.gridColors.length) {
-            this.gridColors[index] = `hsl(${Math.random() * 360}, 70%, 50%)`;
-        }
-    }
-
-    animationLoop() {
-        this.draw();
-        requestAnimationFrame(this.animationLoop.bind(this));
-    }
-
-    draw() {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        const drawerHeight = this.drawer.getHeight();
-        this.drawBackgroundGrid(drawerHeight);
-        
-        this.drawer.draw();
-        
-        // The broker tells the main app which control needs an overlay
-        const overlayControl = this.eventBroker.getOverlayControl();
-        if (overlayControl) {
-            this.drawer.drawOverlay(overlayControl);
-        }
-    }
-
-    drawBackgroundGrid(startY) {
-        const numCols = 20;
-        const cellWidth = this.canvas.width / numCols;
-        const numRows = Math.ceil((this.canvas.height - startY) / cellWidth);
-        
-        this.ctx.save();
-        this.ctx.translate(0, startY);
-        for (let row = 0; row < numRows; row++) {
-            for (let col = 0; col < numCols; col++) {
-                const index = (row * numCols + col) % this.gridColors.length;
-                this.ctx.fillStyle = this.gridColors[index];
-                this.ctx.fillRect(col * cellWidth, row * cellWidth, cellWidth, cellWidth);
-            }
-        }
-        this.ctx.strokeStyle = '#ddd';
-        for (let i = 1; i < numCols; i++) { this.ctx.beginPath(); this.ctx.moveTo(i * cellWidth, 0); this.ctx.lineTo(i * cellWidth, this.canvas.height - startY); this.ctx.stroke(); }
-        for (let i = 1; i < numRows; i++) { this.ctx.beginPath(); this.ctx.moveTo(0, i * cellWidth); this.ctx.lineTo(this.canvas.width, i * cellWidth); this.ctx.stroke(); }
-        this.ctx.restore();
-    }
-}
 
 

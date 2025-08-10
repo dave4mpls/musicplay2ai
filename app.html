@@ -3,7 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Musical Playground</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />    <title>Musical Playground</title>
     <style>
         body, html {
             height: 100%;
@@ -61,11 +63,11 @@
 
         #keyboardCanvas, #pianoRollCanvas {
             position: absolute;
-            width: 100%;
-            height: 100%;
             top: 0;
             left: 0;
-            touch-action: none; /* Prevent default touch actions */
+            width: 100%;
+            height: 100%;
+            touch-action: none;
         }
     </style>
 </head>
@@ -86,7 +88,8 @@
         </div>
     </div>
     
-    <script src="https://cdn.jsdelivr.net/npm/webaudio-tinysynth/webaudio-tinysynth.js"></script>
+    <!-- was: <script src="https://cdn.jsdelivr.net/npm/webaudio-tinysynth/webaudio-tinysynth.js"></script> -->
+    <script src="tinysynth.js"></script>
     <script src="Drawer.js"></script>
     <script src="PianoKeyboard.js"></script>
     <script src="PianoRoll.js"></script>

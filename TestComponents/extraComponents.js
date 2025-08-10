@@ -16,7 +16,7 @@
             return { x: this.x, y: this.y, width: this.width, height: this.height };
         }
 
-        draw() {
+        draw(substituteText = null) {
             const bounds = this.getBounds();
             this.ctx.save();
             const active = this.isActive();
@@ -33,7 +33,7 @@
             this.ctx.fillStyle = active ? '#282c34' : '#abb2bf';
             this.ctx.textAlign = 'center';
             this.ctx.textBaseline = 'middle';
-            this.ctx.fillText(this.label, bounds.x + bounds.width / 2, 
+            this.ctx.fillText(substituteText || this.label, bounds.x + bounds.width / 2, 
                               bounds.y + bounds.height / 2);
             this.ctx.restore();
         }

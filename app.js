@@ -31,6 +31,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const newTopFlexBasis = (newTopHeight / contentWrapper.clientHeight) * 100;
             topRow.style.flexBasis = `${newTopFlexBasis}%`;
         }
+        window.pianoRoll.resizeAndDraw();
     };
 
     dragger.addEventListener('mousedown', startDragging);
@@ -46,7 +47,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const pianoRollCanvas = document.getElementById('pianoRollCanvas');
 
     // Initialize the WebAudioTinySynth
-    const synth = new WebAudioTinySynth({quality:1, useReverb:1});
+    const synth=new WebAudioTinySynth({voices:64});
+    synth.setSoundfontPath("./bsoundfonts");
+    synth.setMasterVol(.50);
+    synth.setReverbLev(.50);
+    synth.loadInstruments([0,11,128],function(errObj) {	// load piano, drums, vibes
+        }, function() { console.log("Instruments loaded."); },
+        function(i,n) { console.log("Loading Instrument " + i + " of " + n); });  // shows example of progress callback
+    synth.setQuality(2);
+    synth.passThruMIDI = false;
     window.synth = synth;
 
     const unlockAudio = () => {
@@ -82,6 +91,10 @@ document.addEventListener('DOMContentLoaded', () => {
         onMidiMessage: sendMidiMessage,
         bpm: 120
     });
+    window.addEventListener('resize', () => {
+    pianoRoll.resizeAndDraw();
+    });
+    window.pianoRoll = pianoRoll;
 
 
     // This function will now be the central point for MIDI routing.
@@ -103,6 +116,7 @@ document.addEventListener('DOMContentLoaded', () => {
         canvas: keyboardCanvas, 
         midiCallback: handleMidiMessage 
     });
+    window.keyboard = keyboard;
 
     // Add some default notes to the piano roll for demonstration
     const defaultNotes = [ 
