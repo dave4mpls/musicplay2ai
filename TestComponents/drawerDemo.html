@@ -861,8 +861,7 @@
         
         // This is the primary event handling method for the drawer
         handleEvent(event) {
-            
-            if (this.eventBroker.capturedControl) {
+            if (this.eventBroker.capturedControl && !this.isPointInBounds(event.x, event.y)) {
                 // If a control is captured, we need to adjust the coordinates
                 event.x += this.scrollOffsetX;
                 event.y += this.scrollOffsetY;
@@ -870,10 +869,7 @@
             const { x, y } = event;
 
             // --- PRIORITY 0: Handle "click outside" for captured controls ---
-            // This is the new logic. If a control is captured but the click is
-            // outside the drawer's bounds, we tell the control it was a global click.
             if (this.eventBroker.capturedControl && !this.isPointInBounds(x, y)) {
-                // We pass the original event, but signal it's a global click by setting the owner to null.
                 const globalClickEvent = { ...event, owner: null };
                 this.eventBroker.dispatchEvent(globalClickEvent, this.eventBroker.capturedControl);
                 return;
@@ -881,15 +877,30 @@
 
             // --- PRIORITY 1: Handle events for a captured control (if click was inside) ---
             if (this.eventBroker.capturedControl) {
-                this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
+                const eventInDrawerSpace = {
+                    ...event,
+                    x: x + this.scrollOffsetX,
+                    y: y + this.scrollOffsetY,
+                };
+                if (event.type === 'wheel') {
+                    this.eventBroker.dispatchEvent(event, this.eventBroker.capturedControl);
+                } else {
+                    this.eventBroker.dispatchEvent(eventInDrawerSpace, this.eventBroker.capturedControl);
+                }
                 return;
             }
 
-            // --- PRIORITY 2: Handle ONGOING drawer-level interactions (scroll/pan) ---
+            // --- PRIORITY 2: Handle ONGOING drawer-level interactions (scroll/pan/drag) ---
             if (this.activeInteraction) {
                 if (event.type === 'pointermove') {
-                    // ... (rest of the switch statement for pan/scroll remains the same)
                     switch(this.activeInteraction.type) {
+                        case 'drag-handle': {
+                            const dy = y - this.activeInteraction.startY;
+                            this.targetHeight = this.activeInteraction.startHeight + dy;
+                            this.calculatedHeight = this.targetHeight;
+                            this.clampHeight();
+                            break;
+                        }
                         case 'pan':
                             this.scrollOffsetX -= (x - this.activeInteraction.lastX);
                             this.scrollOffsetY -= (y - this.activeInteraction.lastY);
@@ -924,6 +935,16 @@
                         }
                     }
                 } else if (event.type === 'pointerup') {
+                    if (this.activeInteraction.type === 'drag-handle') {
+                        // Check if the interaction was a click or a drag.
+                        const dragDistance = Math.abs(y - this.activeInteraction.startY);
+                        if (dragDistance < 5) { // If moved less than 5 pixels, it's a click.
+                            this.isOpen = !this.isOpen;
+                        } else { // Otherwise, it was a drag.
+                            this.isOpen = this.targetHeight > this.HANDLE_HEIGHT * 2;
+                        }
+                        this.updateHeight(); // Snap to final open/closed position.
+                    }
                     this.activeInteraction = null;
                 }
                 return;
@@ -949,7 +970,16 @@
 
             // --- PRIORITY 4: Handle NEW drawer-level interactions ---
             if (event.type === 'pointerdown') {
-                // ... (rest of the logic for starting a new scroll/pan/tab-click remains the same)
+                if (this.isPointInRect(x, y, this.getHandleBounds())) {
+                    // Start a drag interaction, storing the start position.
+                    this.activeInteraction = {
+                        type: 'drag-handle',
+                        startY: y,
+                        startHeight: this.calculatedHeight
+                    };
+                    return;
+                }
+
                 const scrollbarBounds = this.getScrollbarBounds();
                 if (scrollbarBounds.v.handle && this.isPointInRect(x, y, scrollbarBounds.v.handle)) {
                     this.activeInteraction = { type: 'v-scroll', startY: y, startScroll: this.scrollOffsetY };
@@ -957,12 +987,6 @@
                 }
                 if (scrollbarBounds.h.handle && this.isPointInRect(x, y, scrollbarBounds.h.handle)) {
                     this.activeInteraction = { type: 'h-scroll', startX: x, startScroll: this.scrollOffsetX };
-                    return;
-                }
-
-                if (this.isPointInRect(x, y, this.getHandleBounds())) {
-                    this.isOpen = !this.isOpen;
-                    this.updateHeight();
                     return;
                 }
 
@@ -988,52 +1012,68 @@
             }
         }
                 
+        clampHeight() {
+            const maxDrawerHeight = this.canvas.height * 0.8; // Max 80% of screen
+            this.targetHeight = Math.max(this.HANDLE_HEIGHT, Math.min(this.targetHeight, maxDrawerHeight));
+            this.calculatedHeight = this.targetHeight;
+        }
+        
         draw() {
-            const diff = this.targetHeight - this.calculatedHeight;
-            if (Math.abs(diff) > 1) { this.calculatedHeight += diff * 0.2; } 
-            else { this.calculatedHeight = this.targetHeight; }
+            // Animation logic for snapping back after drag/release
+            if (this.activeInteraction?.type !== 'drag-handle') {
+                 const diff = this.targetHeight - this.calculatedHeight;
+                 if (Math.abs(diff) > 1) { this.calculatedHeight += diff * 0.2; }
+                 else { this.calculatedHeight = this.targetHeight; }
+            }
 
             const drawerContentHeight = this.calculatedHeight - this.HANDLE_HEIGHT;
             const { totalTabWidth, visibleWidth } = this.getContentDimensions();
             const tabsShouldScroll = totalTabWidth > visibleWidth;
 
             // --- Main Background ---
-            this.ctx.save();
+            this.ctx.save(); // Initial save
             this.ctx.fillStyle = '#e0e0e0';
             this.ctx.fillRect(0, 0, this.canvas.width, this.calculatedHeight);
 
-            // --- Draw Controls (Always Scrolled) ---
-            if (drawerContentHeight > this.TAB_HEIGHT) {
-                this.ctx.save();
-                // Clip only the area for controls, below the tabs
-                this.ctx.beginPath();
-                this.ctx.rect(0, this.TAB_HEIGHT, this.canvas.width, drawerContentHeight - this.TAB_HEIGHT);
-                this.ctx.clip();
-                // Translate for scrolling
-                this.ctx.translate(-this.scrollOffsetX, -this.scrollOffsetY);
-                this.drawControls();
-                this.ctx.restore();
-            }
+            // --- Draw All Drawer Content (Tabs, Controls, Scrollbars) ---
+            if (drawerContentHeight > 0) {
+                this.ctx.save(); // Save before master clip
 
-            // --- Draw Tabs (Only if drawer is open) ---
-            if (this.isOpen) {
-                this.ctx.save();
-                // Clip just the tab area
+                // Create a master clipping region for ALL content inside the drawer.
+                // This is the key fix: it clips everything to the area above the handle.
                 this.ctx.beginPath();
-                this.ctx.rect(0, 0, this.canvas.width, this.TAB_HEIGHT);
+                this.ctx.rect(0, 0, this.canvas.width, drawerContentHeight);
                 this.ctx.clip();
-                // Only apply horizontal translation if tabs need to scroll
+
+                // --- Draw Tabs (conditionally scrolled) ---
+                this.ctx.save();
                 if (tabsShouldScroll) {
                     this.ctx.translate(-this.scrollOffsetX, 0);
                 }
                 this.drawTabs();
                 this.ctx.restore();
+
+                // --- Draw Controls (always scrolled and clipped below tabs) ---
+                this.ctx.save();
+                // We still need to clip the controls to their own area to prevent
+                // them from drawing over the tabs if scrolled up.
+                this.ctx.beginPath();
+                this.ctx.rect(0, this.TAB_HEIGHT, this.canvas.width, drawerContentHeight - this.TAB_HEIGHT);
+                this.ctx.clip();
+                this.ctx.translate(-this.scrollOffsetX, -this.scrollOffsetY);
+                this.drawControls();
+                this.ctx.restore();
+
+                // --- Draw Scrollbars ---
+                this.drawScrollbars();
+
+                this.ctx.restore(); // Restore from the master clip
             }
 
-            // --- Draw Scrollbars and Handle (Always Fixed) ---
-            this.drawScrollbars();
+            // --- Draw Handle (Always last and on top) ---
             this.drawHandle();
-            this.ctx.restore();
+
+            this.ctx.restore(); // Restore from the initial save
         }
 
         // The event broker will tell us which control needs an overlay
