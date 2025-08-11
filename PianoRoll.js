@@ -23,8 +23,8 @@ class PianoRoll {
             totalBeats: 128,
             totalPitches: 128,
             keysWidth: 100,
-            scrollbarSize: 14,
-            resizeHandleWidth: 10,
+            scrollbarSize: 25,
+            resizeHandleWidth: 15,
             timelineHeight: 30,
             keyWhiteColor: '#f0f0f0',
             keyBlackColor: '#333',
@@ -69,6 +69,8 @@ class PianoRoll {
             isMarqueeSelecting: false,
             isDraggingVScroll: false,
             isDraggingHScroll: false,
+            dragStartPos: { x: 0, y: 0 }, 
+            dragStartScroll: { x: 0, y: 0 }, 
             isPanning: false,
             isDraggingPlayhead: false,
             potentialDeselect: false,
@@ -85,6 +87,7 @@ class PianoRoll {
         this.drawer = new Drawer({
             ctx: this.ctx,
             tabs: this._initTabs(), // We will create this method next
+            dialogs: this._initDialogs(),
             onStateChange: this._onDrawerStateChange.bind(this),
             eventBroker: this.eventBroker,
             handleHeight: 20,
@@ -95,6 +98,10 @@ class PianoRoll {
         this._boundOnInteractionEnd = this._onInteractionEnd.bind(this);
 
         this._init();
+    }
+
+    _initDialogs() {
+        return {  }; // Only standard dialogs needed for now
     }
 
     _initTabs() {
@@ -148,7 +155,7 @@ class PianoRoll {
                 new ButtonControl({ ctx: this.ctx, id: 'add', label: 'Add', isActive: () => this.state.mode === 'add', onClick: () => this.setMode('add'), onStateChange }),
                 new ButtonControl({ ctx: this.ctx, id: 'select',label: 'Select', isActive: () => this.state.mode === 'select', onClick: () => this.setMode('select'), onStateChange }),
                 new ButtonControl({ ctx: this.ctx, id: 'pan', label: 'Pan', isActive: () => this.state.mode === 'pan', onClick: () => this.setMode('pan'), onStateChange }),
-                new ButtonControl({ ctx: this.ctx, id: 'delete', label: 'Delete', onClick: () => this.deleteNotes(), onStateChange }),
+                new ButtonControl({ ctx: this.ctx, id: 'delete', label: 'Delete', onClick: () => this._deleteNotes(), onStateChange }),
                 new ButtonControl({ ctx: this.ctx, id: 'undo', label: '↶ Undo', isActive: () => this.state.undoHistory.length > 0, onClick: () => this.undo(), onStateChange }),
                 new ButtonControl({ ctx: this.ctx, id: 'redo', label: '↷ Redo', isActive: () => this.state.redoHistory.length > 0, onClick: () => this.redo(), onStateChange }),
                 new DropdownControl({ ctx: this.ctx, id: 'channel', label: 'Channel', options: channelOptions, initialValue: this.state.currentChannel, onSelect: (val) => this.setCurrentChannel(val), onStateChange }),
@@ -175,7 +182,16 @@ class PianoRoll {
         // Redraw is handled by the animation loop, so this can often be empty
     }
 
-    _deleteNotes () { 
+    async _deleteNotes () { 
+        if ((this?.state?.selectedNotes?.length ?? 0) === 0) {
+            this.drawer.dialogs['Error'][0].controls[0].label = 'No notes selected to delete.';
+            await this.drawer.openDialog('Error');
+            return;
+        }
+        // Show a confirmation dialog before deleting notes
+        this.drawer.dialogs['Confirm'][0].controls[0].label = 'Are you sure you want to delete the selected notes?';
+        const confirm = await this.drawer.openDialog('Confirm');
+        if (!confirm) return; // If the user cancels, do nothing
         this._saveStateForUndo(); 
         this.state.notes = this.state.notes.filter(n => !this.state.selectedNotes.includes(n)); 
         this.state.selectedNotes = []; 
@@ -254,14 +270,15 @@ class PianoRoll {
                             const calculatedBpm = 60000000 / microsecondsPerQuarterNote;
 
                             pianoRoll.bpm = calculatedBpm;
-
-                            // Find the tempo slider in the drawer to update it
-                            const playbackTab = pianoRoll.drawer.tabs['Playback'];
-                            if (playbackTab) {
-                                const tempoSliderControl = playbackTab.find(c => c instanceof PopupSliderControl);
-                                if (tempoSliderControl) {
-                                    tempoSliderControl.slider.value = Math.round(calculatedBpm);
-                                }
+                        } else {
+                            pianoRoll.bpm = 120; // Default BPM if no tempo event found per MIDI specs
+                        }
+                        // Find the tempo slider in the drawer to update it
+                        const playbackTab = pianoRoll.drawer.tabs['Playback'];
+                        if (playbackTab) {
+                            const tempoSliderControl = playbackTab.find(c => c instanceof PopupSliderControl);
+                            if (tempoSliderControl) {
+                                tempoSliderControl.slider.value = Math.round(calculatedBpm);
                             }
                         }
 
@@ -491,14 +508,14 @@ class PianoRoll {
             return;
         }
 
+        if (this._handleScrollbarMouseDown(pos)) return;
+
         if (this.state.mode === 'pan') {
             this.state.isPanning = true;
             this.state.lastMousePos = pos;
             this.canvas.style.cursor = this._getCursorStyle(rawPos); // Cursor style uses raw position
             return;
         }
-
-        if (this._handleScrollbarMouseDown(pos)) return;
 
         const isGridClick = pos.x > this.config.keysWidth &&
                             pos.x < this.canvas.clientWidth - this.config.scrollbarSize;
@@ -790,43 +807,49 @@ class PianoRoll {
             ctx.strokeRect(marqueeX, marqueeY, w, h); 
         } 
     }
-    _drawScrollbars() { 
-        const { ctx, canvas, config, state } = this; 
-        const { clientWidth, clientHeight } = this._getClientDimensions(); 
-        const { scrollX, scrollY } = state; 
+    _drawScrollbars() {
+        const { ctx, canvas, config, state } = this;
+        const { clientWidth, clientHeight } = this._getClientDimensions();
+        const { scrollX, scrollY } = state;
+        const cornerRadius = 6;
 
-        const contentWidth = config.beatWidth * config.totalBeats; 
-        const contentHeight = config.noteHeight * config.totalPitches; 
+        const contentWidth = config.beatWidth * config.totalBeats;
+        const contentHeight = config.noteHeight * config.totalPitches;
 
-        // Correctly calculate the visible area height
-        const viewWidth = clientWidth - config.keysWidth - config.scrollbarSize; 
-        const viewHeight = clientHeight - config.timelineHeight - config.scrollbarSize; 
+        const viewWidth = clientWidth - config.keysWidth - config.scrollbarSize;
+        const viewHeight = clientHeight - config.timelineHeight - config.scrollbarSize;
 
-        if (contentHeight > viewHeight) { 
-            // Correctly calculate the track height
-            const trackHeight = clientHeight - config.timelineHeight - config.scrollbarSize; 
-            const thumbHeight = Math.max(20, trackHeight * (viewHeight / contentHeight)); 
-            const thumbY = config.timelineHeight + 
-                        (scrollY / (contentHeight - viewHeight)) * (trackHeight - thumbHeight); 
-            ctx.fillStyle = config.scrollbarBg; 
-            ctx.fillRect(clientWidth - config.scrollbarSize, config.timelineHeight, 
-                        config.scrollbarSize, trackHeight); 
-            ctx.fillStyle = config.scrollbarThumb; 
-            ctx.fillRect(clientWidth - config.scrollbarSize, thumbY, 
-                        config.scrollbarSize, thumbHeight); 
-        } 
-        if (contentWidth > viewWidth) { 
-            const trackWidth = clientWidth - config.keysWidth - config.scrollbarSize; 
-            const thumbWidth = Math.max(20, trackWidth * (viewWidth / contentWidth)); 
-            const thumbX = config.keysWidth + 
-                        (scrollX / (contentWidth - viewWidth)) * (trackWidth - thumbWidth); 
-            ctx.fillStyle = config.scrollbarBg; 
-            ctx.fillRect(config.keysWidth, clientHeight - config.scrollbarSize, 
-                        trackWidth, config.scrollbarSize); 
-            ctx.fillStyle = config.scrollbarThumb; 
-            ctx.fillRect(thumbX, clientHeight - config.scrollbarSize, 
-                        thumbWidth, config.scrollbarSize); 
-        } 
+        // Draw Vertical Scrollbar
+        if (contentHeight > viewHeight) {
+            const trackHeight = clientHeight - config.timelineHeight;
+            // Draw track background
+            ctx.fillStyle = config.scrollbarBg;
+            ctx.fillRect(clientWidth - config.scrollbarSize, config.timelineHeight, config.scrollbarSize, trackHeight);
+            
+            // Draw thumb
+            const thumbHeight = Math.max(20, (viewHeight / contentHeight) * trackHeight);
+            const thumbY = config.timelineHeight + (scrollY / (contentHeight - viewHeight)) * (trackHeight - thumbHeight);
+            ctx.fillStyle = config.scrollbarThumb;
+            ctx.beginPath();
+            ctx.roundRect(clientWidth - config.scrollbarSize + 2, thumbY, config.scrollbarSize - 4, thumbHeight, cornerRadius);
+            ctx.fill();
+        }
+
+        // Draw Horizontal Scrollbar
+        if (contentWidth > viewWidth) {
+            const trackWidth = clientWidth - config.keysWidth;
+            // Draw track background
+            ctx.fillStyle = config.scrollbarBg;
+            ctx.fillRect(config.keysWidth, clientHeight - config.scrollbarSize, trackWidth, config.scrollbarSize);
+
+            // Draw thumb
+            const thumbWidth = Math.max(20, (viewWidth / contentWidth) * trackWidth);
+            const thumbX = config.keysWidth + (scrollX / (contentWidth - viewWidth)) * (trackWidth - thumbWidth);
+            ctx.fillStyle = config.scrollbarThumb;
+            ctx.beginPath();
+            ctx.roundRect(thumbX, clientHeight - config.scrollbarSize + 2, thumbWidth, config.scrollbarSize - 4, cornerRadius);
+            ctx.fill();
+        }
     }
     
     // --- PLAYBACK ---
@@ -1004,16 +1027,27 @@ class PianoRoll {
         this.state.marquee.y2 = pos.y; 
         this.draw(); 
     }
-    _handleScrollbarMouseDown(pos) { 
-        const c = this.config, s = this.state, canvas = this.canvas; 
-        const { clientWidth, clientHeight } = this._getClientDimensions(); 
-        if (pos.x > clientWidth - c.scrollbarSize && pos.y > c.timelineHeight) { 
-            s.isDraggingVScroll = true; return true; 
-        } 
-        if (pos.y > clientHeight - c.scrollbarSize && pos.x > c.keysWidth) { 
-            s.isDraggingHScroll = true; return true; 
-        } 
-        return false; 
+    _handleScrollbarMouseDown(pos) {
+        const c = this.config, s = this.state;
+        const { clientWidth, clientHeight } = this._getClientDimensions();
+        
+        // For vertical scrollbar
+        if (pos.x > clientWidth - c.scrollbarSize && pos.y > c.timelineHeight) {
+            s.isDraggingVScroll = true;
+            s.dragStartPos = { ...pos }; // Record starting mouse position
+            s.dragStartScroll.y = s.scrollY; // Record starting scroll position
+            return true;
+        }
+        
+        // For horizontal scrollbar
+        if (pos.y > clientHeight - c.scrollbarSize && pos.x > c.keysWidth) {
+            s.isDraggingHScroll = true;
+            s.dragStartPos = { ...pos }; // Record starting mouse position
+            s.dragStartScroll.x = s.scrollX; // Record starting scroll position
+            return true;
+        }
+        
+        return false;
     }
     _handleScrollbarMouseMove(pos) {
         const c = this.config, s = this.state;
@@ -1022,22 +1056,20 @@ class PianoRoll {
         const contentHeight = c.noteHeight * c.totalPitches;
 
         if (s.isDraggingVScroll) {
-            // Correctly calculate the visible height of the scrollable area
-            const trackHeight = clientHeight - c.timelineHeight - c.scrollbarSize;
-            const dy = pos.y - s.lastMousePos.y;
-            // The change in scrollY should be proportional to the change in mouse position
-            s.scrollY += dy * (contentHeight / trackHeight);
+            const dy = pos.y - s.dragStartPos.y; // Total mouse Y delta
+            const viewHeight = clientHeight - c.timelineHeight - c.scrollbarSize;
+            const ratio = contentHeight / viewHeight;
+            s.scrollY = s.dragStartScroll.y + dy * ratio; // Calculate new position
         }
+
         if (s.isDraggingHScroll) {
-            // Correctly calculate the visible width of the scrollable area
-            const trackWidth = clientWidth - c.keysWidth - c.scrollbarSize;
-            const dx = pos.x - s.lastMousePos.x;
-            // The change in scrollX should be proportional to the change in mouse position
-            s.scrollX += dx * (contentWidth / trackWidth);
+            const dx = pos.x - s.dragStartPos.x; // Total mouse X delta
+            const viewWidth = clientWidth - c.keysWidth - c.scrollbarSize;
+            const ratio = contentWidth / viewWidth;
+            s.scrollX = s.dragStartScroll.x + dx * ratio; // Calculate new position
         }
 
         this._clampScroll();
-        // No need to call draw() here; the animation loop will handle it.
     }
     _handlePan(pos) { 
         const dx = pos.x - this.state.lastMousePos.x; 
@@ -1068,12 +1100,34 @@ class PianoRoll {
     }
 
     // --- UTILITY ---
-    _getMousePos(e, relativeToPage = false) { 
-        const rect = this.canvas.getBoundingClientRect(); 
-        const clientX = e.clientX ?? e.touches?.[0]?.clientX; 
-        const clientY = e.clientY ?? e.touches?.[0]?.clientY; 
-        if (relativeToPage) return { x: clientX, y: clientY }; 
-        return { x: clientX - rect.left, y: clientY - rect.top }; 
+    _getMousePos(e, relativeToPage = false) {
+        const rect = this.canvas.getBoundingClientRect();
+        let point = e; // Assume it's a mouse/pointer event by default
+
+        // For touch end events, the coordinate data is in `changedTouches`.
+        if (e.changedTouches && e.changedTouches.length > 0) {
+            point = e.changedTouches[0];
+        }
+        // For other touch events (start, move), it's in `touches`.
+        else if (e.touches && e.touches.length > 0) {
+            point = e.touches[0];
+        }
+
+        // `point` will now be either the original event (for mouse/pointer)
+        // or the specific touch point, both of which have clientX/clientY.
+        const clientX = point.clientX;
+        const clientY = point.clientY;
+
+        // A final check to prevent errors.
+        if (clientX === undefined || clientY === undefined) {
+            return { x: NaN, y: NaN };
+        }
+
+        if (relativeToPage) {
+            return { x: clientX, y: clientY };
+        }
+
+        return { x: clientX - rect.left, y: clientY - rect.top };
     }
     _getMousePosCorrectedForDrawer(e, relativeToPage = false) {
         const pos = this._getMousePos(e, relativeToPage);

@@ -778,9 +778,14 @@ function WebAudioTinySynth(opt){
           if(this.playing && this.song.ev.length>0){
             var e=this.song.ev[this.playIndex];
             while(this.actx.currentTime+this.preroll>this.playTime){
-              if(e.m[0]==0xff51){
-                this.song.tempo=e.m[1];
-                this.tick2Time=4*60/this.song.tempo/this.song.timebase;
+              if (e.m[0] === 0xFF && e.m[1] === 0x51) {
+                  // 1. Combine the 3 data bytes to get the actual microseconds per quarter note.
+                  const microsecondsPerQuarterNote = (e.m[3] << 16) | (e.m[4] << 8) | e.m[5];
+                  // 2. (Recommended) Calculate the correct BPM and store it.
+                    this.song.tempo = 60000000 / microsecondsPerQuarterNote;
+                  // 3. Calculate the correct 'tick to time' conversion factor.
+                  // This is (seconds per quarter note) / (ticks per quarter note).
+                  this.tick2Time = (microsecondsPerQuarterNote / 1000000) / this.song.timebase;
               }
               else
                 this.send(e.m,this.playTime);   // NOTE: we use public Send, so we can play the midi file on any inputs or outputs!

@@ -1356,6 +1356,11 @@ class Drawer {
         this.onStateChange = config.onStateChange;
         this.canvas = this.ctx.canvas;
         this.eventBroker = config.eventBroker;
+        this.isDialog = false;
+        this.dialogTabName = '';
+        this.preDialogState = { isOpen: false, activeTab: '' };
+        this.dialogs = { ...this.standardDialogs(), ...config.dialogs || {} };
+        this.dialogResolve = null;
 
         this.isOpen = false;
         this.scrollOffsetX = 0;
@@ -1373,13 +1378,45 @@ class Drawer {
         this.handleEvent = this.handleEvent.bind(this);
         this.layoutControls = this.layoutControls.bind(this);
     }
+
+    standardDialogs() {
+        // The drawer has a set of standard dialogs that can be used.  You have to add them to your dialog config parameter to use them though.
+        return {
+            'Confirm': [
+                new RowControl({ ctx: this.ctx, id: 'confirmRow', label: 'Confirm Action', controls: [
+                    new StaticTextControl({ctx: this.ctx, id: 'confirmText', label: 'Are you sure?', autoSize: true, width: 200, height: 50}),
+                ]}),
+                new RowControl({ ctx: this.ctx, id: 'confirmRow', label: 'Confirm Action', controls: [
+                    new ButtonControl({ctx: this.ctx, id: 'confirmYes', label: 'Yes', onClick: () => this.closeDialog(true)}),
+                    new ButtonControl({ctx: this.ctx, id: 'confirmNo', label: 'No', onClick: () => this.closeDialog(false)}),
+                ]}),
+            ],
+            'Error': [
+                new RowControl({ ctx: this.ctx, id: 'confirmRow', label: 'Confirm Action', controls: [
+                    new StaticTextControl({ctx: this.ctx, id: 'confirmText', label: 'Operation could not be completed.', autoSize: true, width: 200, height: 50}),
+                ]}),
+                new RowControl({ ctx: this.ctx, id: 'confirmRow', label: 'Confirm Action', controls: [
+                    new ButtonControl({ctx: this.ctx, id: 'confirmOk', label: 'Ok', onClick: () => this.closeDialog(true)}),
+                ]}),
+            ],
+        }
+    }
     
     getHeight() { return this.calculatedHeight; }
     isAnimating() { return Math.abs(this.targetHeight - this.calculatedHeight) > 1; }
-    isPointInBounds(x, y) { return y < this.calculatedHeight; }
+    isPointInBounds(x, y) { 
+        if (this.isDialog) {
+            return true; // In dialog mode, we capture all events
+        }
+        return y < this.calculatedHeight; 
+    }
     
     // This is the primary event handling method for the drawer
     handleEvent(event) {
+        if (this.isDialog && event.y > this.calculatedHeight) {
+            // In dialog mode, we ignore events outside the dialog area
+            return;
+        }
         if (this.eventBroker.capturedControl && !this.isPointInBounds(event.x, event.y)) {
             // If a control is captured, we need to adjust the coordinates
             event.x += this.scrollOffsetX;
@@ -1473,7 +1510,7 @@ class Drawer {
 
         // --- PRIORITY 3: Certain drawer elements being started that are on top of the controls ---
         if (event.type === 'pointerdown') {
-            if (this.isPointInRect(x, y, this.getHandleBounds())) {
+            if (!this.isDialog && this.isPointInRect(x, y, this.getHandleBounds())) {
                 // Start a drag interaction, storing the start position.
                 this.activeInteraction = {
                     type: 'drag-handle',
@@ -1493,21 +1530,23 @@ class Drawer {
                 return;
             }
 
-            const { totalTabWidth, visibleWidth } = this.getContentDimensions();
-            const tabsShouldScroll = totalTabWidth > visibleWidth;
-            const pointerXForTabs = tabsShouldScroll ? pointerXInDrawer : x;
-            const tabBounds = this.getTabBounds();
+            if (!this.isDialog) {
+                const { totalTabWidth, visibleWidth } = this.getContentDimensions();
+                const tabsShouldScroll = totalTabWidth > visibleWidth;
+                const pointerXForTabs = tabsShouldScroll ? pointerXInDrawer : x;
+                const tabBounds = this.getTabBounds();
 
-            for (const tabName in tabBounds) {
-                if (this.isPointInRect(pointerXForTabs, y, tabBounds[tabName])) {
-                    if (this.activeTab !== tabName) {
-                        this.activeTab = tabName;
-                        this.scrollOffsetX = 0;
-                        this.scrollOffsetY = 0;
-                        this.updateHeight();
-                        this.onStateChange();
+                for (const tabName in tabBounds) {
+                    if (this.isPointInRect(pointerXForTabs, y, tabBounds[tabName])) {
+                        if (this.activeTab !== tabName) {
+                            this.activeTab = tabName;
+                            this.scrollOffsetX = 0;
+                            this.scrollOffsetY = 0;
+                            this.updateHeight();
+                            this.onStateChange();
+                        }
+                        return;
                     }
-                    return;
                 }
             }
         }
@@ -1515,7 +1554,7 @@ class Drawer {
         // --- PRIORITY 4: Delegate to controls if no interaction is active ---
         const pointerXInDrawer = x + this.scrollOffsetX;
         const pointerYInDrawer = y + this.scrollOffsetY;
-        const controls = this.tabs[this.activeTab];
+        const controls = this._getActiveControls();
         let controlUnderPointer = null;
         for (const control of controls) {
             if (control.isPointOnControl(pointerXInDrawer, pointerYInDrawer)) {
@@ -1543,11 +1582,52 @@ class Drawer {
     }
             
     clampHeight() {
-        const maxDrawerHeight = this.canvas.height * 0.8; // Max 80% of screen
+        const maxDrawerHeight = this.canvas.height * 0.7; // Max 70% of screen
         this.targetHeight = Math.max(this.HANDLE_HEIGHT, Math.min(this.targetHeight, maxDrawerHeight));
         this.calculatedHeight = this.targetHeight;
     }
-    
+
+    /**
+     * Opens the drawer in dialog mode to display a specific dialog tab.
+     * @param {string} dialogName - The name of the dialog tab to open.
+     */
+    async openDialog(dialogName) {
+        // Save the current state before entering dialog mode.
+        this.preDialogState = {
+            isOpen: this.isOpen,
+            activeTab: this.activeTab,
+        };
+
+        this.isDialog = true;
+        this.dialogTabName = dialogName;
+        this.activeTab = dialogName; // The active tab is now the dialog tab.
+        this.isOpen = true;          // Force the drawer open.
+        this.updateHeight();         // Update to the full height of the dialog content.
+        return new Promise((resolve => {
+            this.dialogResolve = resolve; // The promise is resolved when the dialog is closed.
+        }))
+    }
+
+    /**
+     * Closes the currently active dialog and returns the drawer to its previous state.
+     */
+    closeDialog(dialogReturnValue = null) {
+        if (!this.isDialog) return;
+
+        this.isDialog = false;
+        this.dialogTabName = '';
+        
+        // Restore the previous state.
+        this.isOpen = this.preDialogState.isOpen;
+        this.activeTab = this.preDialogState.activeTab;
+        this.updateHeight(); // Update height to match the restored state.
+        // Resolve the promise with the dialog return value.
+        if (this.dialogResolve) {
+            this.dialogResolve(dialogReturnValue);
+            this.dialogResolve = null; // Clear the resolve function after use.
+        }
+    }    
+
     draw() {
         // Animation logic for snapping back after drag/release
         if (this.activeInteraction?.type !== 'drag-handle') {
@@ -1621,37 +1701,54 @@ class Drawer {
         this.ctx.save();
         this.ctx.font = '14px sans-serif';
         this.ctx.textBaseline = 'middle';
-        const tabBounds = this.getTabBounds();
+        const tabBounds = this.getTabBounds(); // This now respects dialog mode
 
-        for(const tabName in tabBounds) {
+        // If in dialog mode, draw the dialog title centered.
+        if (this.isDialog) {
+            const tabName = this.dialogTabName;
             const bounds = tabBounds[tabName];
-            const isActive = tabName === this.activeTab;
-            this.ctx.fillStyle = isActive ? '#d0d0d0' : '#e0e0e0';
-            this.ctx.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
-            this.ctx.fillStyle = isActive ? '#000' : '#555';
-            this.ctx.fillText(tabName, bounds.x + 15, bounds.y + bounds.height / 2);
+            if (bounds) {
+                this.ctx.fillStyle = '#d0d0d0';
+                this.ctx.fillRect(0, 0, this.canvas.width, this.TAB_HEIGHT); // Full width background
+                this.ctx.fillStyle = '#000';
+                this.ctx.textAlign = 'center'; // Center the dialog title
+                this.ctx.fillText(tabName, this.canvas.width / 2, bounds.y + bounds.height / 2);
+            }
+        } else {
+            // Normal tab drawing logic
+            for(const tabName in tabBounds) {
+                const bounds = tabBounds[tabName];
+                const isActive = tabName === this.activeTab;
+                this.ctx.fillStyle = isActive ? '#d0d0d0' : '#e0e0e0';
+                this.ctx.fillRect(bounds.x, bounds.y, bounds.width, bounds.height);
+                this.ctx.fillStyle = isActive ? '#000' : '#555';
+                this.ctx.textAlign = 'left'; // Align normal tabs to the left
+                this.ctx.fillText(tabName, bounds.x + 15, bounds.y + bounds.height / 2);
+            }
         }
+
+        // Draw the bottom border for the tab area.
         this.ctx.strokeStyle = '#b0b0b0';
         this.ctx.lineWidth = 1;
         this.ctx.beginPath();
         this.ctx.moveTo(0, this.TAB_HEIGHT - 0.5);
-        
-        // Get both content and visible (canvas) width
-        const { contentWidth, visibleWidth } = this.getContentDimensions();
-        // Draw the line to whichever width is greater
-        this.ctx.lineTo(Math.max(contentWidth, visibleWidth), this.TAB_HEIGHT - 0.5);
-
+        const { totalTabWidth, visibleWidth } = this.getContentDimensions();
+        const lineLength = this.isDialog ? visibleWidth : Math.max(totalTabWidth, visibleWidth);
+        this.ctx.lineTo(lineLength, this.TAB_HEIGHT - 0.5);
         this.ctx.stroke();
+        
         this.ctx.restore();
     }
 
     drawControls() {
-        const controls = this.tabs[this.activeTab];
+        const controls = this._getActiveControls();
         this.layoutControls(controls);
         controls.forEach(control => control.draw(false)); // Always draw base first
     }
     
     drawHandle() {
+        if (this.isDialog) return; // Do not draw the handle in dialog mode.
+
         const bounds = this.getHandleBounds();
         this.ctx.save();
         this.ctx.fillStyle = '#b0b0b0';
@@ -1696,28 +1793,43 @@ class Drawer {
             xPos = nestedX;
             yPos = nestedY;
         }
-        
-        let maxH = 0;
+
+        // Initialize maxH with the starting height of the current row set.
+        // This handles cases where a row might be empty.
+        let maxH = yPos;
+
         for (const control of controls) {
-            // see if we have increased the height of the drawer
-            maxH = Math.max(maxH, control.y + control.height);
-            // If the control is a row control, we should lay those out in a row, then return to the start of the next row.
             if (control instanceof RowControl) {
-                const childMaxH = this.layoutControls(control.controls, true, xPos, yPos); // Recursive call to handle nested arrays
-                xPos = this.CONTROL_PADDING.x; // Reset xPos for the next row   
-                // when returning to the next row we have to add the height of the controls in this row, plus padding
-                yPos = childMaxH + this.CONTROL_SPACING.y;
-                continue;
+                // 1. Recursively lay out the child row. The returned value is the
+                //    absolute bottom coordinate of that row's content.
+                const childRowBottomY = this.layoutControls(control.controls, true, xPos, yPos);
+                
+                // 2. Update our overall max height with the height of the child row.
+                maxH = Math.max(maxH, childRowBottomY);
+
+                // 3. Set the starting Y position for the *next* row.
+                yPos = childRowBottomY + this.CONTROL_SPACING.y;
+                xPos = this.CONTROL_PADDING.x; // Reset X for the new row.
+                continue; // Proceed to the next RowControl
             }
-            // Before laying out, ask the control to update its width if it can.
+
+            // For non-row controls:
             if (typeof control.updateWidth === 'function') {
                 control.updateWidth();
             }
             let cWidth = (control instanceof ToggleSwitch) ? control.getFullWidth() : control.width;
-            control.x = xPos; 
+
+            // 1. SET the control's position using the current yPos.
+            control.x = xPos;
             control.y = yPos;
+            
+            // 2. THEN update maxH with the new bottom coordinate.
+            maxH = Math.max(maxH, control.y + control.height);
+
+            // 3. Advance xPos for the next control in the same row.
             xPos += cWidth + this.CONTROL_SPACING.x;
         }
+        
         return maxH;
     }
 
@@ -1726,11 +1838,16 @@ class Drawer {
         this.ctx.save();
         this.ctx.font = '14px sans-serif';
         let xPos = 10;
-        for(const tabName in this.tabs) {
-            const tabWidth = this.ctx.measureText(tabName).width + 30;
+
+        // Determine which set of items to create bounds for.
+        const source = this.isDialog ? { [this.dialogTabName]: this.dialogs[this.dialogTabName] } : this.tabs;
+
+        for(const tabName in source) {
+            const tabWidth = this.ctx.measureText(tabName).width + 30; // Add padding
             bounds[tabName] = { x: xPos, y: 0, width: tabWidth, height: this.TAB_HEIGHT };
             xPos += tabWidth;
         }
+        
         this.ctx.restore();
         return bounds;
     }
@@ -1742,7 +1859,9 @@ class Drawer {
     }
     
     getContentDimensions() {
-        const controls = this.tabs[this.activeTab];
+        const controls = this._getActiveControls();
+        this.layoutControls(controls);
+
         const visibleWidth = this.canvas.width;
         const visibleHeight = this.calculatedHeight - this.HANDLE_HEIGHT;
 
@@ -1758,7 +1877,6 @@ class Drawer {
             return { contentWidth: 0, contentHeight: 0, visibleWidth, visibleHeight, totalTabWidth };
         }
         
-        this.layoutControls(controls);
         let maxW = 0, maxH = 0;
         controls.forEach(c => {
             if (c instanceof RowControl) {
@@ -1819,6 +1937,13 @@ class Drawer {
             this.targetHeight = this.HANDLE_HEIGHT;
         }
         this.clampScroll();
+    }
+
+    _getActiveControls() {
+        if (this.isDialog) {
+            return this.dialogs[this.activeTab] || [];
+        }
+        return this.tabs[this.activeTab] || [];
     }
 
     isPointInRect(x, y, rect) {
