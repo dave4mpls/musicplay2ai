@@ -23,14 +23,19 @@
         .title {
             text-align: center;
             padding: 0.5rem;
-            background-color: #f0f0f0;
             border-bottom: 1px solid #ccc;
+            /* This creates the rainbow gradient background for the whole title bar */
+            background-image: linear-gradient(to right, 
+                #9575CD, #64B5F6, #81C784, #FFF176, #FFB74D, #E57373);
         }
 
         .title h3 {
             margin: 0;
             font-weight: bold;
             font-size: 1.2rem;
+            color: #fff; /* Set text to white for readability */
+            /* Add a subtle shadow to make the text pop against the gradient */
+            text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.4);
         }
 
         .content-wrapper {

@@ -448,8 +448,14 @@ class ButtonControl extends BaseControl {
     }
 
     onPointerUp() {
-        this.isPressed = false;
-        return { action: 'release' };
+        if (this.isPressed) {
+            this.isPressed = false;
+            if (this.onRelease) {
+                this.onRelease(); // Call the new optional onRelease callback
+            }
+            return { action: 'release' };
+        }
+        return null;
     }
 
     isPointOnControl(x, y) {
@@ -464,6 +470,65 @@ class ButtonControl extends BaseControl {
             this.ctx.restore();
         }
     }
+}
+
+class SpaceControl extends BaseControl {
+    constructor(config) {
+        super(config);
+        this.width = config.width || 5;
+        this.height = config.height || 5;
+    }
+
+    getBounds() {
+        return { x: this.x, y: this.y, width: this.width, height: this.height };
+    }
+
+    draw() {
+        // It's a space.  It doesn't draw anything.
+    }
+
+    // This control is not interactive
+    isPointOnControl(x, y) { return false; }
+}
+
+class ColorCircleControl extends BaseControl {
+    constructor(config) {
+        super(config);
+        this.width = config.width || 28;
+        this.height = config.height || 28;
+        this.color = config.color || '#ccc';
+    }
+
+    getBounds() {
+        return { x: this.x, y: this.y, width: this.width, height: this.height };
+    }
+
+    draw() {
+        const bounds = this.getBounds();
+        const centerX = bounds.x + bounds.width / 2;
+        const centerY = bounds.y + bounds.height / 2;
+        const radius = Math.min(bounds.width, bounds.height) / 2;
+
+        this.ctx.save();
+        
+        // Draw the colored circle
+        this.ctx.fillStyle = this.color;
+        this.ctx.beginPath();
+        this.ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+        this.ctx.fill();
+
+        // Draw the number inside
+        this.ctx.font = 'bold 12px sans-serif';
+        this.ctx.fillStyle = '#fff'; // White text for contrast
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'middle';
+        this.ctx.fillText(this.label, centerX, centerY + 1); // +1 for better vertical centering
+        
+        this.ctx.restore();
+    }
+
+    // This control is not interactive
+    isPointOnControl(x, y) { return false; }
 }
 
 class StaticTextControl extends BaseControl {
@@ -516,6 +581,60 @@ class StaticTextControl extends BaseControl {
             this.width = textMetrics.width + this.padding;
             this.ctx.restore();
         }
+    }
+}
+
+class DrumbeatControl extends BaseControl {
+    constructor(config) {
+        super(config);
+        this.beats = config.beats || 32;
+        this.divisions = config.divisions || 8; // For thicker lines
+        this.width = config.width || 400;
+        this.height = config.height || 28;
+        this.value = config.initialValue || new Array(this.beats).fill(false);
+    }
+
+    getBounds() {
+        return { x: this.x, y: this.y, width: this.width, height: this.height };
+    }
+
+    draw() {
+        const bounds = this.getBounds();
+        const beatWidth = bounds.width / this.beats;
+        this.ctx.save();
+        this.ctx.strokeStyle = '#333';
+
+        for (let i = 0; i < this.beats; i++) {
+            const beatX = bounds.x + i * beatWidth;
+            
+            // Fill color
+            this.ctx.fillStyle = this.value[i] ? '#3b82f6' : '#fff';
+            this.ctx.fillRect(beatX, bounds.y, beatWidth, bounds.height);
+
+            // Border
+            this.ctx.lineWidth = (i % this.divisions === 0) ? 3 : 0.5;
+            this.ctx.strokeRect(beatX, bounds.y, beatWidth, bounds.height);
+        }
+        this.ctx.restore();
+    }
+
+    onPointerDown(x, y) {
+        if (this.isPointOnControl(x, y)) {
+            const bounds = this.getBounds();
+            const beatWidth = bounds.width / this.beats;
+            const beatIndex = Math.floor((x - bounds.x) / beatWidth);
+
+            if (beatIndex >= 0 && beatIndex < this.beats) {
+                this.value[beatIndex] = !this.value[beatIndex];
+                this.onStateChange(this); // Notify parent of the change
+            }
+            return { action: 'update' };
+        }
+        return null;
+    }
+
+    isPointOnControl(x, y) {
+        return this.isPointInRect(x, y, this.getBounds());
     }
 }
 
@@ -1423,6 +1542,8 @@ class Drawer {
             event.y += this.scrollOffsetY;
         }
         const { x, y } = event;
+        const pointerXInDrawer = x + this.scrollOffsetX;
+        const pointerYInDrawer = y + this.scrollOffsetY;
 
         // --- PRIORITY 0: Handle "click outside" for captured controls ---
         if (this.eventBroker.capturedControl && !this.isPointInBounds(x, y)) {
@@ -1552,8 +1673,6 @@ class Drawer {
         }
 
         // --- PRIORITY 4: Delegate to controls if no interaction is active ---
-        const pointerXInDrawer = x + this.scrollOffsetX;
-        const pointerYInDrawer = y + this.scrollOffsetY;
         const controls = this._getActiveControls();
         let controlUnderPointer = null;
         for (const control of controls) {
@@ -1897,11 +2016,17 @@ class Drawer {
     }
 
     getScrollbarBounds() {
-        const { contentWidth, contentHeight, visibleWidth, visibleHeight } = this.getContentDimensions();
+        // Get all dimensions, including the total width of the tabs.
+        const { contentWidth, contentHeight, visibleWidth, visibleHeight, totalTabWidth } = this.getContentDimensions();
         const bounds = { v: {}, h: {} };
+
+        // Determine the maximum required width for scrolling by comparing control and tab widths.
+        const maxScrollWidth = Math.max(contentWidth, totalTabWidth);
+
         const hasVScroll = contentHeight > visibleHeight;
-        const hasHScroll = contentWidth > visibleWidth;
-        
+        // Use the new maxScrollWidth to check if a horizontal scrollbar is needed.
+        const hasHScroll = maxScrollWidth > visibleWidth;
+
         if (hasVScroll) {
             const trackHeight = visibleHeight - (hasHScroll ? this.SCROLLBAR_SIZE : 0);
             const handleHeight = Math.max(20, (visibleHeight / contentHeight) * trackHeight);
@@ -1913,11 +2038,12 @@ class Drawer {
 
         if (hasHScroll) {
             const trackWidth = visibleWidth - (hasVScroll ? this.SCROLLBAR_SIZE : 0);
-            const handleWidth = Math.max(20, (visibleWidth / contentWidth) * trackWidth);
-            const scrollableDist = contentWidth - visibleWidth;
+            // Use maxScrollWidth to correctly calculate the handle's size and position.
+            const handleWidth = Math.max(20, (visibleWidth / maxScrollWidth) * trackWidth);
+            const scrollableDist = maxScrollWidth - visibleWidth;
             const handleX = (this.scrollOffsetX / scrollableDist) * (trackWidth - handleWidth);
             bounds.h.track = { x: 0, y: visibleHeight - this.SCROLLBAR_SIZE, width: trackWidth, height: this.SCROLLBAR_SIZE };
-            bounds.h.handle = { x: handleX, y: visibleHeight - this.SCROLLBAR_SIZE, width: handleWidth, height: this.SCROLLBAR_SIZE };
+            bounds.h.handle = { x: handleX, y: visibleHeight - this.SCROLLBAR_SIZE, width: handleWidth, height: handleWidth };
         }
         return bounds;
     }

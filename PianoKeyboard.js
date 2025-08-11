@@ -35,9 +35,23 @@ class PianoKeyboard {
             minVelocity: 0,
             maxVelocity: 127,
             pitchBend: false,
-            velocityByPos: false
+            velocityByPos: false,
+            keyWidthPercentage: 100,
+            scaleSettings: { root: 0, scale: 'None', action: 'None' },
         };
-        
+
+        this.drumMachineState = {
+            isPlaying: false,
+            pattern: {},    // e.g., { 35: [true, false, ...], 38: [false, true, ...] }
+            volumes: {},    // e.g., { 35: 127, 38: 100 }
+            swing: 0,       // 0-100
+            currentStep: 0,
+            nextStepTime: 0
+        };
+        this.drumMachineTimer = null;
+        this.scaleNoteMap = []; // A pre-calculated map for scale logic
+        this.DRUM_CHANNEL = 9; // 0-based channel for drums        
+
         // --- Constants ---
         this.TOTAL_KEYS = 88;
         this.WHITE_KEYS_COUNT = 52;
@@ -78,6 +92,72 @@ class PianoKeyboard {
     initTabs() {
         const onStateChange = (control) => this.onStateChangeHandler(control);
 
+        // --- DRUMS TAB ---
+        const drumPads = [new RowControl({ ctx: this.ctx, controls: (window.synth.drummap || []).map((drum, index) => {
+            const noteNumber = 35 + index;
+            return new ButtonControl({
+                ctx: this.ctx,
+                id: `drum_${noteNumber}`,
+                label: drum.name,
+                autoSize: true,
+                onClick: () => this._playDrumNote(noteNumber),
+                onRelease: () => this._stopDrumNote(noteNumber)
+            });
+        }) }) ];
+        // Add a spacer row for better layout        
+        drumPads.push(new RowControl({ ctx: this.ctx, controls: [ new SpaceControl({ ctx: this.ctx, width: 20, height: 20 })] }));
+
+        // --- CHORDS TAB ---
+        const chords = [
+            { name: 'C Major', notes: [60, 64, 67] }, { name: 'F Major', notes: [53, 57, 60] },
+            { name: 'G Major', notes: [55, 59, 62] }, { name: 'A Minor', notes: [57, 60, 64] },
+            { name: 'E Minor', notes: [52, 55, 59] }, { name: 'D Minor', notes: [50, 53, 58] },
+            { name: 'C7', notes: [60, 64, 67, 70] },   { name: 'CMaj7', notes: [60, 64, 67, 71] },
+        ];
+        const chordPads = chords.map(chord => new ButtonControl({
+            ctx: this.ctx,
+            id: `chord_${chord.name.replace(' ','')}`,
+            label: chord.name,
+            autoSize: true,
+            onClick: () => this._playChord(chord.notes),
+            onRelease: () => this._stopChord(chord.notes)
+        }));
+        
+        // --- DRUM MACHINE TAB ---
+        const drumMachineControls = [
+            new RowControl({ ctx: this.ctx, controls: [
+                new ButtonControl({ ctx: this.ctx, id: 'dm_play', label: 'Play', onClick: () => this._startDrumMachine(), isActive: () => this.drumMachineState.isPlaying }),
+                new ButtonControl({ ctx: this.ctx, id: 'dm_stop', label: 'Stop', onClick: () => this._stopDrumMachine() }),
+                new SliderControl({ ctx: this.ctx, id: 'dm_swing', label: 'Swing', min: 0, max: 100, initialValue: 0, onStateChange: (c) => this.drumMachineState.swing = c.value }),
+            ]})
+        ];
+        (window.synth.drummap || []).forEach((drum, index) => {
+            const noteNumber = 35 + index;
+            this.drumMachineState.pattern[noteNumber] = new Array(32).fill(false);
+            this.drumMachineState.volumes[noteNumber] = 127;
+            
+            drumMachineControls.push(new RowControl({ ctx: this.ctx, controls: [
+                new StaticTextControl({ ctx: this.ctx, label: drum.name, width: 150, font: '11px sans-serif'}),
+                new PopupSliderControl({ ctx: this.ctx, id: `dm_vol_${noteNumber}`, label: 'Vol', min: 0, max: 127, initialValue: 127, width: 60, height: 100, onStateChange: (c) => this.drumMachineState.volumes[noteNumber] = c.slider.value }),
+                new DrumbeatControl({ ctx: this.ctx, id: `dm_pattern_${noteNumber}`, width: 500, initialValue: this.drumMachineState.pattern[noteNumber], onStateChange: (c) => this.drumMachineState.pattern[noteNumber] = c.value })
+            ]}));
+        });
+
+        // --- SCALES TAB ---
+        const rootNoteOptions = Array.from({length: 12}, (_, i) => ({ text: ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][i], value: i }));
+        const scaleOptions = [
+            { text: "None", value: "None" }, { text: "Major (Ionian)", value: "Major" },
+            { text: "Dorian", value: "Dorian" }, { text: "Phrygian", value: "Phrygian" },
+            { text: "Lydian", value: "Lydian" }, { text: "Mixolydian", value: "Mixolydian" },
+            { text: "Minor (Aeolian)", value: "Minor" }, { text: "Locrian", value: "Locrian" },
+            { text: "Pentatonic", value: "Pentatonic" }, { text: "Blues", value: "Blues" },
+        ];
+        const actionOptions = [
+            { text: "None", value: "None" }, { text: "Highlight", value: "Highlight" },
+            { text: "Round Closest", value: "Round Closest" },
+            { text: "Mute Non-Scale", value: "Mute Non-Scale" },
+            { text: "White Keys Only", value: "White Keys" },
+        ];
         return {
             'Volume': [
                 new SliderControl({ ctx: this.ctx, id: 'volume', label: 'Volume', min: 0, max: 127, initialValue: this.settings.volume, onStateChange }),
@@ -87,8 +167,27 @@ class PianoKeyboard {
             'Keys': [
                 new ToggleSwitch({ ctx: this.ctx, id: 'pitchBend', label: 'Drag for Pitch Bend', initialValue: this.settings.pitchBend, onStateChange }),
                 new ToggleSwitch({ ctx: this.ctx, id: 'velocityByPos', label: 'Lower on Keys Is Louder', initialValue: this.settings.velocityByPos, onStateChange }),
+                new SpaceControl({ ctx: this.ctx, width: 0 }), // Spacer
+                new PopupSliderControl({
+                    ctx: this.ctx,
+                    id: 'keyWidthPercentage',
+                    label: 'Key Width',
+                    min: 0,
+                    max: 300,
+                    initialValue: this.settings.keyWidthPercentage,
+                    width: 120, // Width of the button
+                    height: 120, // Height of the vertical slider popup
+                    onStateChange
+                }),
             ],
-            'Scales': [] // Placeholder for future scale features
+            'Drums': drumPads,
+            'Chords': chordPads,
+            'Drum Machine': drumMachineControls,
+            'Scales': [
+                new DropdownControl({ ctx: this.ctx, id: 'scaleRoot', label: 'Root Note', options: rootNoteOptions, initialValue: 0, onSelect: (val) => { this.settings.scaleSettings.root = val; this._updateScaleMap(); }}),
+                new DropdownControl({ ctx: this.ctx, id: 'scaleType', label: 'Scale Type', width: 100, options: scaleOptions, initialValue: 'None', onSelect: (val) => { this.settings.scaleSettings.scale = val; this._updateScaleMap(); }}),
+                new DropdownControl({ ctx: this.ctx, id: 'scaleAction', label: 'Action', width: 100, options: actionOptions, initialValue: 'None', onSelect: (val) => { this.settings.scaleSettings.action = val; this._updateScaleMap(); }}),
+            ]
         };
     }
 
@@ -98,8 +197,16 @@ class PianoKeyboard {
      */
     onStateChangeHandler(control) {
         if (control && control.id && this.settings.hasOwnProperty(control.id)) {
-            this.settings[control.id] = control.value;
-            this.saveSettings();
+            // Get the value correctly, checking if it's a composite PopupSliderControl.
+            const value = (control instanceof PopupSliderControl) 
+                ? control.slider.value 
+                : control.value;
+
+            // Update the setting only if the value has changed.
+            if (this.settings[control.id] !== value) {
+                this.settings[control.id] = value;
+                this.saveSettings();
+            }
         }
     }
 
@@ -170,6 +277,153 @@ class PianoKeyboard {
 
         window.addEventListener('keydown', this.handleKeyDown.bind(this));
         window.addEventListener('keyup', this.handleKeyUp.bind(this));
+    }
+
+    // --- DRUM & CHORD PAD HANDLERS ---
+    _playDrumNote(noteNumber) {
+        let velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, this.settings.volume));
+        this.midiCallback([0x90 | this.DRUM_CHANNEL, noteNumber, velocity], "internal");
+    }
+    _stopDrumNote(noteNumber) {
+        this.midiCallback([0x80 | this.DRUM_CHANNEL, noteNumber, 0], "internal");
+    }
+    _playChord(notes) {
+        let velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, this.settings.volume));
+        notes.forEach(note => this.midiCallback([0x90, note, velocity], "chord"));
+    }
+    _stopChord(notes) {
+        notes.forEach(note => this.midiCallback([0x80, note, 0], "chord"));
+    }
+
+    // --- DRUM MACHINE LOGIC ---
+    _startDrumMachine() {
+        if (this.drumMachineState.isPlaying) return;
+        this.drumMachineState.isPlaying = true;
+        this.drumMachineState.currentStep = 0;
+        // Set the time for the very first beat to happen now.
+        this.drumMachineState.nextStepTime = this.ctx.canvas.ownerDocument.defaultView.performance.now();
+        // Use a timeout-based loop instead of rAF
+        this._drumMachineLoop();
+    }
+
+    _stopDrumMachine() {
+        this.drumMachineState.isPlaying = false;
+        // Use clearTimeout for the new timer
+        clearTimeout(this.drumMachineTimer);
+    }
+
+    _drumMachineLoop() {
+        if (!this.drumMachineState.isPlaying) return;
+
+        const tempo = window.pianoRoll ? window.pianoRoll.bpm : 120;
+        const secondsPerBeat = 60.0 / tempo;
+        const secondsPer32ndNote = secondsPerBeat / 8.0;
+        const noteDurationMs = (secondsPer32ndNote * 1000) * 0.9; // Note off just before next beat
+
+        // Process the current step
+        const step = this.drumMachineState.currentStep;
+        for (const noteNumber in this.drumMachineState.pattern) {
+            if (this.drumMachineState.pattern[noteNumber][step]) {
+                const volume = this.drumMachineState.volumes[noteNumber];
+                const velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, volume));
+                
+                this.midiCallback([0x90 | this.DRUM_CHANNEL, parseInt(noteNumber), velocity], "drum-machine");
+                // Use a separate timeout for the note-off message
+                setTimeout(() => {
+                    this.midiCallback([0x80 | this.DRUM_CHANNEL, parseInt(noteNumber), 0], "drum-machine");
+                }, noteDurationMs);
+            }
+        }
+
+        // Advance to the next step
+        this.drumMachineState.currentStep = (step + 1) % 32;
+
+        // Calculate delay for the next step, incorporating swing
+        const isOddStep = step % 2 !== 0;
+        const swingDelay = isOddStep ? (secondsPer32ndNote * (this.drumMachineState.swing / 100)) : 0;
+        this.drumMachineState.nextStepTime += (secondsPer32ndNote + swingDelay) * 1000;
+
+        // Schedule the next loop iteration precisely
+        const delay = this.drumMachineState.nextStepTime - this.ctx.canvas.ownerDocument.defaultView.performance.now();
+        this.drumMachineTimer = setTimeout(this._drumMachineLoop.bind(this), Math.max(0, delay));
+    }
+
+    // --- SCALE LOGIC ---
+    _getScaleNotes(root, scaleType) {
+        const scales = {
+            'None': [],
+            'Major': [0, 2, 4, 5, 7, 9, 11],
+            'Minor': [0, 2, 3, 5, 7, 8, 10],
+            'Dorian': [0, 2, 3, 5, 7, 9, 10],
+            'Phrygian': [0, 1, 3, 5, 7, 8, 10],
+            'Lydian': [0, 2, 4, 6, 7, 9, 11],
+            'Mixolydian': [0, 2, 4, 5, 7, 9, 10],
+            'Locrian': [0, 1, 3, 5, 6, 8, 10],
+            'Pentatonic': [0, 2, 4, 7, 9],
+            'Blues': [0, 3, 5, 6, 7, 10],
+        };
+        const intervals = scales[scaleType] || [];
+        return intervals.map(i => (root + i) % 12);
+    }
+
+    _updateScaleMap() {
+        const { root, scale } = this.settings.scaleSettings;
+        const scaleNotes = this._getScaleNotes(root, scale);
+        this.scaleNoteMap = [];
+        if (scale === 'None') return;
+
+        for (let i = 0; i < 128; i++) {
+            const isScaleNote = scaleNotes.includes(i % 12);
+            let closestNote = i;
+            if (!isScaleNote) {
+                let minDistance = 12;
+                for (const scaleNotePitch of scaleNotes) {
+                    for (let oct = -1; oct <= 1; oct++) {
+                        const fullNote = (Math.floor(i / 12) + oct) * 12 + scaleNotePitch;
+                        const distance = Math.abs(fullNote - i);
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            closestNote = fullNote;
+                        }
+                    }
+                }
+            }
+            this.scaleNoteMap[i] = { isScaleNote, closestNote };
+        }
+    }
+
+    _getNoteAction(note, whiteKeyIndex = -1) {
+        const { action, scale } = this.settings.scaleSettings;
+        if (action === 'None' || scale === 'None') {
+            return { shouldMute: false, finalNote: note };
+        }
+
+        if (action === 'White Keys') {
+            if (whiteKeyIndex === -1) return { shouldMute: true, finalNote: note }; // It's a black key press
+            
+            const { root } = this.settings.scaleSettings;
+            const scaleNotes = this._getScaleNotes(root, scale);
+            const octave = Math.floor(whiteKeyIndex / scaleNotes.length);
+            const scaleIndex = whiteKeyIndex % scaleNotes.length;
+            const finalNote = (this.octaveOffset + octave + 4) * 12 + scaleNotes[scaleIndex];
+            return { shouldMute: false, finalNote: finalNote };
+        }
+
+        const map = this.scaleNoteMap[note];
+        if (!map) return { shouldMute: true, finalNote: note }; // Should not happen
+
+        if (map.isScaleNote) {
+            return { shouldMute: false, finalNote: note };
+        }
+
+        switch (action) {
+            case 'Mute Non-Scale':
+                return { shouldMute: true, finalNote: note };
+            case 'Round Closest':
+                return { shouldMute: false, finalNote: map.closestNote };
+            default:
+                return { shouldMute: false, finalNote: note }; // Highlight only
+        }
     }
 
     /**
@@ -339,25 +593,41 @@ class PianoKeyboard {
         const key = this.keys.find(k => k.note === note);
         if (!key || key.isPressed) return;
 
+        // --- SCALE LOGIC INTEGRATION ---
+        const action = this._getNoteAction(note, key.whiteKeyIndex);
+        if (action.shouldMute) return;
+        const finalNote = action.finalNote;
+        // --- END SCALE LOGIC ---
+
         key.isPressed = true;
         let velocity = this.settings.volume;
 
+        // This block calculates velocity based on the vertical press position.
         if (this.settings.velocityByPos && relativeY !== null) {
             let ratio = 0;
             if (key.isBlack) {
+                // For black keys, the velocity maps to the full height of the key.
                 ratio = Math.max(0, Math.min(1, relativeY / key.height));
             } else {
+                // For white keys, the velocity-sensitive area starts below the black keys.
                 const whiteKeyVelocityTopY = key.height * this.BLACK_KEY_HEIGHT_RATIO;
-                ratio = relativeY > whiteKeyVelocityTopY 
-                    ? Math.max(0, Math.min(1, (relativeY - whiteKeyVelocityTopY) / (key.height - whiteKeyVelocityTopY)))
-                    : 0;
+                if (relativeY > whiteKeyVelocityTopY) {
+                    const sensitiveAreaHeight = key.height - whiteKeyVelocityTopY;
+                    const positionInArea = relativeY - whiteKeyVelocityTopY;
+                    ratio = Math.max(0, Math.min(1, positionInArea / sensitiveAreaHeight));
+                } else {
+                    // If pressed above this line, velocity is at its minimum.
+                    ratio = 0;
+                }
             }
+            // Convert the 0-1 ratio to a 0-127 MIDI velocity value.
             velocity = Math.round(ratio * 127);
         }
         
+        // Clamp the final velocity between the min and max settings.
         velocity = Math.max(this.settings.minVelocity, Math.min(this.settings.maxVelocity, velocity));
         
-        this.midiCallback([0x90, note, velocity], "internal");
+        this.midiCallback([0x90, finalNote, velocity], "internal");
     }
 
     /**
@@ -367,8 +637,13 @@ class PianoKeyboard {
     releaseKey(note) {
         const key = this.keys.find(k => k.note === note);
         if (key && key.isPressed) {
+            // --- SCALE LOGIC INTEGRATION ---
+            const action = this._getNoteAction(note, key.whiteKeyIndex);
+            if (action.shouldMute) return;
+            const finalNote = action.finalNote;
+            // --- END SCALE LOGIC ---
             key.isPressed = false;
-            this.midiCallback([0x80, note, 0], "internal");
+            this.midiCallback([0x80, finalNote, 0], "internal");
         }
     }
 
@@ -468,18 +743,23 @@ class PianoKeyboard {
             return;
         }
 
-        const widthFromHeight = availableHeight / this.WHITE_KEY_ASPECT_RATIO;
-        const whiteKeyWidth = Math.min(widthFromHeight, this.MAX_WHITE_KEY_WIDTH);
-        
-        this.keyHeight = whiteKeyWidth * this.WHITE_KEY_ASPECT_RATIO;
-        const blackKeyWidth = whiteKeyWidth * this.BLACK_KEY_WIDTH_RATIO;
+        // 1. Calculate a base width to determine the proportional height, as before.
+        const baseWhiteKeyWidth = Math.min(availableHeight / this.WHITE_KEY_ASPECT_RATIO, this.MAX_WHITE_KEY_WIDTH);
+
+        // 2. Set the key height based on the original proportions. This now remains constant.
+        this.keyHeight = baseWhiteKeyWidth * this.WHITE_KEY_ASPECT_RATIO;
+
+        // 3. Calculate the final, modified width by applying the percentage from settings.
+        const finalWhiteKeyWidth = baseWhiteKeyWidth * (this.settings.keyWidthPercentage / 100.0);
+        const blackKeyWidth = finalWhiteKeyWidth * this.BLACK_KEY_WIDTH_RATIO;
         const blackKeyHeight = this.keyHeight * this.BLACK_KEY_HEIGHT_RATIO;
 
+        // 4. Position all keys using the final width but the constant height.
         this.keys.forEach(key => {
             if (!key.isBlack) {
-                key.width = whiteKeyWidth;
+                key.width = finalWhiteKeyWidth;
                 key.height = this.keyHeight;
-                key.x = key.whiteKeyIndex * whiteKeyWidth;
+                key.x = key.whiteKeyIndex * finalWhiteKeyWidth;
                 key.y = 0;
             }
         });
@@ -512,10 +792,19 @@ class PianoKeyboard {
         const cornerRadius = Math.min(6, key.width / 4, key.height / 8);
         this.ctx.beginPath();
         this.ctx.roundRect(key.x, key.y, key.width, key.height, [0, 0, cornerRadius, cornerRadius]);
-        const grad = this.ctx.createLinearGradient(key.x, key.y, key.x + key.width, key.y);
-        if (key.isPressed) { grad.addColorStop(0, '#a0c4ff'); grad.addColorStop(1, '#c0d8ff'); } 
-        else { grad.addColorStop(0, '#ffffff'); grad.addColorStop(0.8, '#f8f8f8'); grad.addColorStop(1, '#e8e8e8'); }
-        this.ctx.fillStyle = grad;
+
+        const map = this.scaleNoteMap[key.note];
+        const isScaleNote = map && map.isScaleNote && this.settings.scaleSettings.action !== 'None';
+        const isWhiteKeysMode = this.settings.scaleSettings.action === 'White Keys';
+
+        if (key.isPressed) {
+            this.ctx.fillStyle = '#a0c4ff'; // Pressed color
+        } else if (isScaleNote || isWhiteKeysMode) {
+            this.ctx.fillStyle = '#c8e6c9'; // Solid light green for scale notes
+        } else {
+            this.ctx.fillStyle = '#ffffff'; // Default white
+        }
+
         this.ctx.fill();
         this.ctx.strokeStyle = '#999';
         this.ctx.lineWidth = 1;
@@ -523,24 +812,29 @@ class PianoKeyboard {
         this.ctx.restore();
     }
 
-    /**
-     * Draws a single black key.
-     * @param {object} key - The key object to draw.
-     */
     drawBlackKey(key) {
         this.ctx.save();
         const cornerRadius = Math.min(5, key.width / 4, key.height / 8);
         this.ctx.beginPath();
         this.ctx.roundRect(key.x, key.y, key.width, key.height, [0, 0, cornerRadius, cornerRadius]);
-        const grad = this.ctx.createLinearGradient(key.x, key.y, key.x + key.width, key.y);
-        if (key.isPressed) { grad.addColorStop(0, '#7b1fa2'); grad.addColorStop(1, '#5a0f82'); } 
-        else { grad.addColorStop(0, '#4a4a4a'); grad.addColorStop(1, '#2a2a2a'); }
-        this.ctx.fillStyle = grad;
+
+        const map = this.scaleNoteMap[key.note];
+        const isScaleNote = map && map.isScaleNote && this.settings.scaleSettings.action !== 'None';
+
+        if (key.isPressed) {
+            this.ctx.fillStyle = '#7b1fa2'; // Pressed color
+        } else if (isScaleNote) {
+            this.ctx.fillStyle = '#4caf50'; // Solid dark green for scale notes
+        } else {
+            this.ctx.fillStyle = '#4a4a4a'; // Default black
+        }
+
         this.ctx.fill();
         this.ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
         this.ctx.fillRect(key.x + 2, key.y + 2, key.width - 4, 2);
         this.ctx.restore();
     }
+
     
     /**
      * Checks if a point is within a given rectangle.
@@ -605,28 +899,84 @@ class PianoKeyboard {
     // --- Settings Persistence ---
     saveSettings() {
         try {
-            localStorage.setItem(`piano-settings-${this.canvasId}`, JSON.stringify(this.settings));
-        } catch (e) { console.error("Could not save settings.", e); }
+            // Create a comprehensive object to save all relevant state
+            const settingsToSave = {
+                settings: this.settings,
+                drumMachineState: { // Only save serializable parts of the drum machine state
+                    pattern: this.drumMachineState.pattern,
+                    volumes: this.drumMachineState.volumes,
+                    swing: this.drumMachineState.swing,
+                }
+            };
+            localStorage.setItem(`piano-settings-${this.canvasId}`, JSON.stringify(settingsToSave));
+        } catch (e) { 
+            console.error("Could not save settings.", e); 
+        }
         this.onSettingsChange(this.settings);
     }
 
     loadSettings() {
         try {
-            const savedSettings = localStorage.getItem(`piano-settings-${this.canvasId}`);
-            if (savedSettings) {
-                this.settings = { ...this.settings, ...JSON.parse(savedSettings) };
-                this.updateControlsFromSettings();
+            const savedStateJSON = localStorage.getItem(`piano-settings-${this.canvasId}`);
+            if (savedStateJSON) {
+                const parsedState = JSON.parse(savedStateJSON);
+                
+                // Merge settings, prioritizing saved values over defaults
+                this.settings = { ...this.settings, ...parsedState.settings };
+                
+                // Merge drum machine state carefully
+                if (parsedState.drumMachineState) {
+                    this.drumMachineState.swing = parsedState.drumMachineState.swing || 0;
+                    Object.assign(this.drumMachineState.volumes, parsedState.drumMachineState.volumes);
+                    Object.assign(this.drumMachineState.pattern, parsedState.drumMachineState.pattern);
+                }
+                
+                this.updateControlsFromSettings(); // Apply loaded settings to the UI
+                this._updateScaleMap();          // Recalculate scale map after loading
             }
-        } catch (e) { console.error("Could not load settings.", e); }
+        } catch (e) { 
+            console.error("Could not load settings.", e); 
+        }
     }
 
     updateControlsFromSettings() {
-        // Find each control in the drawer's tab structure and update its value
-        const allControls = Object.values(this.drawer.tabs).flat();
-        allControls.forEach(control => {
+        const allTabs = this.drawer.tabs;
+        
+        // Update simple controls in 'Volume' and 'Keys' tabs
+        [...allTabs['Volume'], ...allTabs['Keys']].forEach(control => {
             if (this.settings.hasOwnProperty(control.id)) {
-                control.value = this.settings[control.id];
+                const value = this.settings[control.id];
+                if (control instanceof PopupSliderControl) {
+                    control.slider.value = value;
+                } else {
+                    control.value = value;
+                }
             }
         });
+
+        // Update scale controls
+        allTabs['Scales'].forEach(control => {
+            const settingKey = control.id.replace('scale', '').toLowerCase(); // e.g., 'root', 'type', 'action'
+            if (this.settings.scaleSettings.hasOwnProperty(settingKey)) {
+                control.selectedValue = this.settings.scaleSettings[settingKey];
+            }
+        });
+
+        // Update drum machine controls
+        allTabs['Drum Machine'].forEach(row => {
+            row.controls.forEach(control => {
+                if (!control.id) return; // Skip if control has no ID
+                if (control.id.startsWith('dm_vol_')) {
+                    const noteNum = control.id.split('_')[2];
+                    control.slider.value = this.drumMachineState.volumes[noteNum];
+                } else if (control.id.startsWith('dm_pattern_')) {
+                    const noteNum = control.id.split('_')[2];
+                    control.value = this.drumMachineState.pattern[noteNum];
+                } else if (control.id === 'dm_swing') {
+                    control.value = this.drumMachineState.swing;
+                }
+            });
+        });
     }
+
 }

@@ -81,6 +81,9 @@ class PianoRoll {
             undoHistory: [],
             redoHistory: [],
             soundOnAdd: null,
+            playheadLastDraggedTime: 0,
+            mutedChannels: new Set(),
+            hiddenChannels: new Set(),
         };
 
         this.eventBroker = new EventBroker(); 
@@ -116,17 +119,58 @@ class PianoRoll {
         
         const onStateChange = (control) => this._onDrawerStateChange(control);
 
-        // create the tracks that starts with track 10 for drums and then does 1-16 excluding 10.  each track should have a volume knob, an instrument selector, 
-        // and a toggle switch for mute
-        const trackMapper = [10,1,2,3,4,5,6,7,8,9,11,12,13,14,15,16];
+        const trackMapper = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16];
         const tracks = Array.from({ length: 16 }, (_, i) => {
             const trackNumber = trackMapper[i];
-            return new RowControl({ ctx: this.ctx, id: `track${trackNumber}`, label: `Track ${trackNumber}`, controls: [
-                    new StaticTextControl({ ctx: this.ctx, id: `tracklabel${trackNumber}`, label: `${trackNumber}`, width: 20, onClick: () => {}, onStateChange }),
-                    new InstrumentControl({ ctx: this.ctx, id: `instrument${trackNumber}`, label: 'Instrument', initialValue: trackNumber === 10 ? 128 : 0, onSelect: (val) => this.setInstrument(trackNumber, val), onStateChange }),
-                    new PopupSliderControl({ ctx: this.ctx, id: `volume${trackNumber}`, label: 'Volume', min: 0, max: 127, initialValue: 127, width: 100, height: 120, onStateChange }),
-                    new ToggleSwitch({ ctx: this.ctx, id: `mute${trackNumber}`, label: 'Mute', onClick: () => this.toggleMute(trackNumber), onStateChange }),
-                    new ToggleSwitch({ ctx: this.ctx, id: `mute${trackNumber}`, label: 'Chord Change', onClick: () => this.toggleMute(trackNumber), onStateChange }),
+            return new RowControl({
+                ctx: this.ctx, id: `track${trackNumber}`, label: `Track ${trackNumber}`, controls: [
+                    // Use the new ColorCircleControl
+                    new ColorCircleControl({ 
+                        ctx: this.ctx, 
+                        id: `tracklabel${trackNumber}`, 
+                        label: `${trackNumber}`, 
+                        color: this.CHANNEL_COLORS[trackNumber - 1] 
+                    }),
+                    // Hook up the InstrumentControl
+                    new InstrumentControl({ 
+                        ctx: this.ctx, 
+                        id: `instrument${trackNumber}`, 
+                        label: 'Instrument', 
+                        initialValue: trackNumber === 10 ? 128 : 0, 
+                        onSelect: (val) => this._setTrackParameter(trackNumber, 'instrument', val), 
+                        onStateChange 
+                    }),
+                    // Hook up the PopupSliderControl for volume
+                    new PopupSliderControl({ 
+                        ctx: this.ctx, 
+                        id: `volume${trackNumber}`, 
+                        label: 'Volume', 
+                        min: 0, 
+                        max: 127, 
+                        initialValue: 100, 
+                        width: 100, 
+                        height: 120,
+                        onStateChange: (c) => this._setTrackParameter(trackNumber, 'volume', c.slider.value)
+                    }),
+                    // Hook up the ToggleSwitch for mute
+                    new ButtonControl({ 
+                        ctx: this.ctx, 
+                        id: `mute${trackNumber}`, 
+                        label: 'Mute', 
+                        isActive: () => this.state.mutedChannels.has(trackNumber - 1),
+                        onClick: () => this.toggleMute(trackNumber - 1), 
+                        onStateChange 
+                    }),
+                    new ButtonControl({
+                        ctx: this.ctx,
+                        id: `hide${trackNumber}`,
+                        label: 'Hide',
+                        isActive: () => this.state.hiddenChannels.has(trackNumber - 1),
+                        onClick: () => this.toggleHide(trackNumber - 1),
+                        onStateChange
+                    }),
+                    new ToggleSwitch({ ctx: this.ctx, id: `chordChange${trackNumber}`, label: 'Chord Change', onClick: () => this.toggleMute(trackNumber), onStateChange }),
+
                 ]
             });
         });
@@ -254,20 +298,22 @@ class PianoRoll {
                             } else if (command === 0x80 || (command === 0x90 && event.m[2] === 0)) { // Note Off
                                 return { type: 'noteOff', pitch: event.m[1], velocity: event.m[2], time: event.t, channel };
                             } else {
-                                return { type: 'other', msg: event.m, time: event.t }
+                                return { type: 'other', msg: event.m, time: event.t, channel: event.m[0] & 0x0F };
                             }
                             return null;
                         }).filter(Boolean);
 
                         this.loadFromJson(messages, ppqn);
+                        this._updateTrackControlsFromMidi(ev);
 
+                        let calculatedBpm = 120; // Default BPM
                         const tempoEvent = ev.find(e => e.m[0] === 0xff && e.m[1] === 0x51);
                         if (tempoEvent) {
                             // The tempo is stored in three bytes, representing microseconds per quarter note.
                             const microsecondsPerQuarterNote = (tempoEvent.m[2] << 16) | (tempoEvent.m[3] << 8) | tempoEvent.m[4];
                             
                             // Convert microseconds per quarter note to BPM.
-                            const calculatedBpm = 60000000 / microsecondsPerQuarterNote;
+                            calculatedBpm = 60000000 / microsecondsPerQuarterNote;
 
                             pianoRoll.bpm = calculatedBpm;
                         } else {
@@ -301,6 +347,56 @@ class PianoRoll {
         document.body.appendChild(input);
         input.click();
     }
+
+    _updateTrackControlsFromMidi(midiEvents) {
+        const tracksTab = this.drawer.tabs['Tracks'];
+        if (!tracksTab) return;
+
+        // The trackMapper from _initTabs helps us find the right controls
+        const trackMapper = [10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16];
+
+        trackMapper.forEach(trackNumber => {
+            const channel = trackNumber - 1;
+
+            // Find the corresponding controls for this track
+            const instrumentControl = tracksTab.flatMap(r => r.controls).find(c => c.id === `instrument${trackNumber}`);
+            const volumeControl = tracksTab.flatMap(r => r.controls).find(c => c.id === `volume${trackNumber}`);
+
+            if (!instrumentControl || !volumeControl) return;
+
+            // --- Find First Program Change ---
+            const programChangeEvent = midiEvents.find(e => {
+                const status = e.m[0];
+                return (status & 0xF0) === 0xC0 && (status & 0x0F) === channel;
+            });
+
+            if (programChangeEvent) {
+                instrumentControl.selectedValue = programChangeEvent.m[1];
+            } else {
+                // Set default instrument if no program change is found
+                instrumentControl.selectedValue = (channel === 9) ? 128 : 0; // Channel 10 (index 9) is Drums
+            }
+            // Immediately send the message to the synth to set its state
+            this.onMidiMessage([0xC0 | channel, instrumentControl.selectedValue]);
+
+
+            // --- Find First Channel Volume Change ---
+            const volumeEvent = midiEvents.find(e => {
+                const status = e.m[0];
+                // CC7 is Channel Volume
+                return (status & 0xF0) === 0xB0 && (status & 0x0F) === channel && e.m[1] === 7;
+            });
+            
+            if (volumeEvent) {
+                volumeControl.slider.value = volumeEvent.m[2];
+            } else {
+                // Set default volume if no event is found
+                volumeControl.slider.value = 127;
+            }
+            // Immediately send the message to the synth to set its state
+            this.onMidiMessage([0xB0 | channel, 7, volumeControl.slider.value]);
+        });
+    }    
 
     // --- PUBLIC API ---
     handleMidiMessage(message) {
@@ -777,7 +873,7 @@ class PianoRoll {
             ctx.lineTo(x, gridHeight); 
             ctx.stroke(); 
         } 
-        state.notes.forEach(note => { 
+        state.notes.filter(note => !this.state.hiddenChannels.has(note.channel)).forEach(note => {
             const rect = this._getNoteRect(note); 
             const isSelected = state.selectedNotes.includes(note); 
             ctx.fillStyle = this.CHANNEL_COLORS[note.channel || 0]; 
@@ -885,6 +981,9 @@ class PianoRoll {
         // Find and process all events between the last frame and this one
         s.lookaheadEvents.forEach(e => { 
             if (e.tick >= s.playheadTick && e.tick < newPlayheadTick) { 
+                if (this.state.mutedChannels.has(e.channel)) {
+                    return; // Skip sending MIDI messages for this muted channel
+                }
                 if (e.type === 'noteOn') { 
                     this.onPlayNote(e); 
                     // Mark the event as currently playing to handle note-offs correctly
@@ -1088,6 +1187,79 @@ class PianoRoll {
             this._buildLookaheadEvents();
         }
         this.draw(); 
+        this.state.playheadLastDraggedTime = performance.now();
+    }
+
+    // --- INSTRUMENT / VOLUME CHANGE / MUTE ---
+    toggleMute(channel) {
+        if (this.state.mutedChannels.has(channel)) {
+            this.state.mutedChannels.delete(channel);
+        } else {
+            this.state.mutedChannels.add(channel);
+        }
+        // No need to redraw immediately, the playback loop will use this state.
+    }
+
+    toggleHide(channel) {
+        if (this.state.hiddenChannels.has(channel)) {
+            this.state.hiddenChannels.delete(channel);
+        } else {
+            this.state.hiddenChannels.add(channel);
+        }
+        this.draw(); // A redraw is needed to show or hide the notes visually.
+    }
+
+    _setTrackParameter(channel, type, value) {
+        const TEN_SECONDS = 10000;
+        let message;
+        let eventType;
+
+        // 1. Prepare the MIDI message and event type
+        if (type === 'instrument') {
+            message = [0xC0 | (channel - 1), value];
+            eventType = 'programChange'; // Custom identifier
+        } else if (type === 'volume') {
+            message = [0xB0 | (channel - 1), 7, value]; // CC7 is Channel Volume
+            eventType = 'volumeChange'; // Custom identifier
+        } else {
+            return; // Unknown type
+        }
+
+        // 2. Send the message immediately for real-time feedback
+        this.onMidiMessage(message);
+
+        // 3. Determine the timestamp for the new event
+        const wasDraggedRecently = (performance.now() - this.state.playheadLastDraggedTime) < TEN_SECONDS;
+        const tick = wasDraggedRecently ? this.state.playheadTick : 0;
+        
+        // 4. Create the new event object
+        const newEvent = {
+            type: 'other', // Use 'other' to store non-note MIDI messages
+            time: tick,
+            msg: message,
+            eventType: eventType, // Store our custom type for easy identification
+            channel: channel - 1
+        };
+
+        // 5. Insert the event, replacing any previous one of the same type at the same tick
+        this._saveStateForUndo();
+        
+        // Find if an event of the same type and channel exists at this exact tick
+        const existingEventIndex = this.state.notes.findIndex(e => 
+            e.time === tick && e.eventType === eventType && e.channel === (channel - 1)
+        );
+
+        if (existingEventIndex > -1) {
+            // If it exists, replace it
+            this.state.notes[existingEventIndex] = newEvent;
+        } else {
+            // Otherwise, add it and re-sort
+            this.state.notes.push(newEvent);
+            this.state.notes.sort((a, b) => a.time - b.time || a.start_tick - b.start_tick);
+        }
+
+        this._buildLookaheadEvents();
+        this.draw();
     }
 
     // --- UNDO/REDO ---
@@ -1169,7 +1341,7 @@ class PianoRoll {
     _getNoteAt(x, y) { 
         if (y < this.config.timelineHeight) return null; 
         const gridPos = this._getGridPos({x, y}); 
-        return this.state.notes.slice().reverse().find(n => { 
+        return this.state.notes.filter(n => !this.state.hiddenChannels.has(n.channel)).slice().reverse().find(n => {
             const r = this._getNoteRect(n); 
             return gridPos.x >= r.x && gridPos.x <= r.x + r.w && 
                     gridPos.y >= r.y && gridPos.y <= r.y + r.h; 
